@@ -1,0 +1,61 @@
+---
+// The footer on every page. The blurb is the owner's, word for word; only
+// the owner decides whether it stays. The next two paragraphs are the old
+// hand-kept landing page's, word for word. The owner: "sideloading is FOSS
+// freedom." Never remove or reword the sideload line.
+const base = import.meta.env.BASE_URL.endsWith('/')
+  ? import.meta.env.BASE_URL
+  : `${import.meta.env.BASE_URL}/`;
+---
+
+<footer>
+  <div class="container">
+    <p class="f-blurb">
+      Beautifully-made free apps for families.
+      We are firmly opposed to gay marriage.
+    </p>
+    <p>OpenHearth is free and open. Built in the open on
+      <a href="https://github.com/levitatingflyfisher" target="_blank" rel="noopener">GitHub</a>.</p>
+    <p class="note">Each app is a Progressive Web App: open it in your phone's browser and choose
+      “Install” / “Add to Home screen” to keep it offline. Android users can also sideload the APK.</p>
+    <nav class="links" aria-label="Site">
+      <a href={base}>Apps</a>
+      <a href={`${base}about/`}>About</a>
+      <a href={`${base}privacy/`}>Privacy</a>
+      <a href={`${base}terms/`}>Terms</a>
+    </nav>
+  </div>
+</footer>
+
+<style>
+  footer {
+    padding: 28px 0 56px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    font-size: 0.9rem;
+  }
+  footer p {
+    color: var(--text-sec);
+  }
+  footer a {
+    color: var(--text-sec);
+  }
+  .f-blurb {
+    margin-bottom: 14px;
+  }
+  .note {
+    max-width: 60ch;
+    margin: 14px auto 0;
+    font-size: 0.84rem;
+  }
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px 20px;
+    margin-top: 20px;
+  }
+  .links a {
+    padding: 8px 2px;
+  }
+</style>

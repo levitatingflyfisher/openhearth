@@ -1,0 +1,10 @@
+name: "Peckish"
+kind: "Family food"
+order: 4
+c1: "#E0AC3F"
+c2: "#7A4160"
+line: "Plan the week’s dinners, keep family recipes, and get the grocery list."
+desc: "Feed the week. Plan dinners on a row of plates, keep the family recipe box, and send the plan to an aisle-sorted grocery list. Log meals in a tap or two against a built-in offline food database: no account, no ads, works in airplane mode."
+pwa: "https://levitatingflyfisher.github.io/Peckish/"
+apk: "https://github.com/levitatingflyfisher/Peckish/releases/download/v0-apk/Peckish.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#7A4160' opacity='.16'/><circle cx='256' cy='256' r='140' fill='none' stroke='#7A4160' stroke-width='30'/><path d='M256 116 A140 140 0 1 1 174 369' stroke='#E0AC3F' stroke-width='30' fill='none' stroke-linecap='round'/><circle cx='256' cy='256' r='34' fill='#6F8F52'/></svg>"

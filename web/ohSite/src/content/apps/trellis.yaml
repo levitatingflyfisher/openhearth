@@ -1,0 +1,10 @@
+name: "Trellis"
+kind: "Read, listen, study"
+order: 11
+c1: "#C47B6A"
+c2: "#A85040"
+line: "Read your own books and articles, listen to podcasts, and quiz yourself to remember."
+desc: "One app for the household's whole knowledge diet. Bring in books, articles, podcasts, or anything shared from another app: episodes are transcribed on your own device. Read one word at a time, or follow along on the page as it is spoken, up to 4×, in the original or translated on your device. Then study what you keep: recall on a schedule that takes the hints away as it sticks, opening each concept only once the ones underneath it hold. Feeds are plain reverse-chronological and kept as a permanent archive: the app never develops an interest in your attention. Export to Anki any time."
+pwa: "https://levitatingflyfisher.github.io/Trellis/"
+apk: "https://github.com/levitatingflyfisher/Trellis/releases/latest/download/Trellis.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#C47B6A' opacity='.16'/><g stroke='#C47B6A' stroke-width='26' stroke-linecap='round'><line x1='120' y1='200' x2='312' y2='392'/><line x1='120' y1='120' x2='392' y2='392'/><line x1='200' y1='120' x2='392' y2='312'/></g><g stroke='#A85040' stroke-width='26' stroke-linecap='round'><line x1='120' y1='312' x2='312' y2='120'/><line x1='120' y1='392' x2='392' y2='120'/><line x1='200' y1='392' x2='392' y2='200'/></g></svg>"

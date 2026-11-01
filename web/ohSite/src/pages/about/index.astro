@@ -1,0 +1,139 @@
+---
+import Base from '../../layouts/Base.astro';
+---
+
+<Base title="About | OpenHearth">
+  <main class="about-page">
+    <div class="container">
+
+      <header class="page-header reveal d1">
+        <p class="page-eyebrow">About</p>
+        <h1>What OpenHearth stands for</h1>
+      </header>
+
+      <div class="prose">
+        <section class="prose-section manifesto reveal d2">
+          <h2>What OpenHearth stands for.</h2>
+          <p>We are for young, big families: the households where the next generation is actually born, raised, and formed.</p>
+          <p>We are against a policy class with no stake in the future it legislates.</p>
+          <p>We are for the covenant of one man and one woman, ordered to children, permanent by design.</p>
+          <p>We are against the state's redefinition of marriage, and against the catechism that calls principled disagreement a hatred.</p>
+          <p>We are for private property and the fruits of honest labor.</p>
+          <p>We are against Rainbow Maoism: the reallocation of a family's wages by race, grievance, and sexual politics dressed in the language of liberation. Your work, your wages, your household. Yours.</p>
+          <p>We are for thick community: the parish, the block, the table set for ten, the neighbors who know your children's names.</p>
+          <p>We are against the commune, the cult, and every utopia that swallows the household to feed itself.</p>
+          <p>We are for friendships forged in presence: shared work, shared meals, shared burdens, shared decades.</p>
+          <p>We are against the counterfeit intimacy of the feed, and the loneliness it sells as connection.</p>
+          <p>We are for present parents as the first and final authority over their children's formation.</p>
+          <p>We are against the public school monopoly, the unions that shield educator misconduct at rates exceeding the clergy scandals a generation was taught to revile, and the activists, surgeons, and prescribers profiting from manufactured doubt about children's own bodies.</p>
+          <p>We are for peace: peace in the heart, peace at the hearth, peace in the home.</p>
+          <p>We are against every institution that has declared the ordinary family a site of oppression rather than the foundation of a free people.</p>
+          <p>We are for Christlike love made concrete in neighborhoods, parishes, and local governments small enough to know a family's name.</p>
+          <p>We are against the distant, the childless, and the contemptuous, wherever they sit and whatever they call themselves.</p>
+        </section>
+      </div>
+
+    </div>
+  </main>
+</Base>
+
+<style>
+  .about-page {
+    padding-top: 100px; /* clear fixed nav */
+    padding-bottom: 96px;
+    min-height: 100vh;
+    background: var(--bg);
+  }
+
+  /* ── Page header ── */
+  .page-header {
+    padding: 56px 0 48px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 56px;
+  }
+  .page-eyebrow {
+    font-family: var(--font-ui);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.4px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 12px;
+  }
+  .page-header h1 {
+    font-family: var(--font-heading);
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.1;
+    margin-bottom: 18px;
+  }
+  .status-line {
+    display: inline-block;
+    max-width: 720px;
+    padding: 10px 16px;
+    border-left: 3px solid var(--accent);
+    background: var(--bg-tinted);
+    border-radius: 0 var(--oh-r-md) var(--oh-r-md) 0;
+    font-family: var(--font-ui);
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-sec);
+  }
+
+  /* ── Prose layout ── */
+  .prose {
+    max-width: 720px;
+  }
+  .prose-section h2 {
+    font-family: var(--font-heading);
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 20px;
+    line-height: 1.2;
+  }
+  .prose-section p {
+    font-size: 1rem;
+    color: var(--text-sec);
+    line-height: 1.75;
+    margin-bottom: 16px;
+  }
+  .prose-section p:last-child {
+    margin-bottom: 0;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 980px) {
+    .about-page {
+      padding-top: 88px;
+      padding-bottom: 72px;
+    }
+    .page-header {
+      padding: 40px 0 36px;
+      margin-bottom: 40px;
+    }
+  }
+  @media (max-width: 640px) {
+    .about-page {
+      padding-top: 76px;
+      padding-bottom: 56px;
+    }
+    .page-header {
+      padding: 32px 0 28px;
+      margin-bottom: 32px;
+    }
+    .prose-section h2 {
+      font-size: 1.2rem;
+    }
+  }
+
+  /* ── Reduced motion ── */
+  @media (prefers-reduced-motion: reduce) {
+    .reveal {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
+  }
+</style>

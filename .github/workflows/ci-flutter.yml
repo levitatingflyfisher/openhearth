@@ -1,0 +1,35 @@
+name: OpenHearth Flutter CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  workspace-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: subosito/flutter-action@e938fdf56512cc96ef2f93cfde925500825cd506 # v2.18.0
+        with:
+          flutter-version: '3.38.7'
+          channel: 'stable'
+          cache: true
+      - name: Resolve Dart Pub Workspace
+        run: flutter pub get
+      - name: Analyze shared packages
+        run: |
+          for pkg in packages/ohStyle/openhearth_design packages/sanctuary_auth_core packages/sanctuary_backup_ui packages/oh_fleet_conformance packages/oh_release_kit packages/elo_engine packages/domovoi; do
+            echo "=== Analyzing $pkg ==="
+            (cd "$pkg" && flutter analyze)
+          done
+      - name: Test shared packages
+        run: |
+          for pkg in packages/ohStyle/openhearth_design packages/sanctuary_auth_core packages/sanctuary_backup_ui packages/oh_fleet_conformance packages/oh_release_kit packages/elo_engine packages/domovoi; do
+            echo "=== Testing $pkg ==="
+            (cd "$pkg" && flutter test --no-pub -j 1)
+          done

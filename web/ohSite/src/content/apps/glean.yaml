@@ -1,0 +1,15 @@
+name: "glean"
+kind: "Family finance"
+order: 17
+c1: "#5E8B86"
+c2: "#3C615C"
+line: "A family budget app for your computer. You can also read it in a browser."
+desc: "Plain-text family finance: a local-first budget and ledger on the hledger / Paisa model. A desktop app for Windows, macOS, and Linux, plus a read-only web viewer that opens a journal right in your browser: parsed on-device by glean's real engine, nothing uploaded."
+pwa: "https://levitatingflyfisher.github.io/glean/"
+pwaLabel: "Web viewer →"
+desktopBuilds:
+  win: "https://github.com/levitatingflyfisher/levitatingflyfisher.github.io/releases/download/glean-desktop-v0/glean-windows-setup.exe"
+  mac: "https://github.com/levitatingflyfisher/levitatingflyfisher.github.io/releases/download/glean-desktop-v0/glean-macos.dmg"
+  linux: "https://github.com/levitatingflyfisher/levitatingflyfisher.github.io/releases/download/glean-desktop-v0/glean-x86_64.AppImage"
+desktopAll: "https://github.com/levitatingflyfisher/levitatingflyfisher.github.io/releases/tag/glean-desktop-v0"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#5E8B86' opacity='.16'/><g transform='translate(256 256) rotate(-22)'><line x1='0' y1='-4' x2='0' y2='134' stroke='#5E8B86' stroke-width='26' stroke-linecap='round'/></g><g transform='translate(256 256) rotate(0)'><line x1='0' y1='-4' x2='0' y2='134' stroke='#5E8B86' stroke-width='26' stroke-linecap='round'/></g><g transform='translate(256 256) rotate(22)'><line x1='0' y1='-4' x2='0' y2='134' stroke='#5E8B86' stroke-width='26' stroke-linecap='round'/></g><g transform='translate(256 256) rotate(-22)'><path d='M0,-174 Q37,-90 0,-6 Q-37,-90 0,-174 Z' fill='#3C615C'/></g><g transform='translate(256 256) rotate(0)'><path d='M0,-182 Q38,-94 0,-6 Q-38,-94 0,-182 Z' fill='#3C615C'/></g><g transform='translate(256 256) rotate(22)'><path d='M0,-174 Q37,-90 0,-6 Q-37,-90 0,-174 Z' fill='#3C615C'/></g><rect x='196' y='249' width='120' height='30' rx='15' fill='#3C615C'/></svg>"

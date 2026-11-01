@@ -1,0 +1,176 @@
+---
+// One app on the landing page: the icon, the name, one plain line, the
+// buttons, and the longer description under "More".
+//
+// Button colour says the platform: copper is the web app, pine is the
+// Android APK, slate is the desktop download. All three carry equal weight.
+import type { CollectionEntry } from 'astro:content';
+
+interface Props {
+  app: CollectionEntry<'apps'>;
+}
+const { app } = Astro.props;
+const a = app.data;
+const icon = `data:image/svg+xml,${encodeURIComponent(a.icon)}`;
+---
+
+<article class="card" id={app.id} style={`--c1:${a.c1}`}>
+  <div class="card-head">
+    <img class="card-ico" src={icon} alt="" width="52" height="52" />
+    <div>
+      <div class="kind">{a.kind}</div>
+      <h3>{a.name}</h3>
+    </div>
+  </div>
+  <p class="line">{a.line}</p>
+  <div class="actions">
+    <a class="btn btn-web" href={a.pwa}>{a.pwaLabel ?? 'Open web app →'}</a>
+    {a.apk && <a class="btn btn-apk" href={a.apk}>Android app ↓</a>}
+    {a.desktopBuilds && (
+      <span class="desktop" data-desktop>
+        <a
+          class="btn btn-desktop"
+          href={a.desktopBuilds.linux}
+          data-win={a.desktopBuilds.win}
+          data-mac={a.desktopBuilds.mac}
+          data-linux={a.desktopBuilds.linux}
+        >Download for Linux ↓</a>
+        <a class="btn btn-ghost" href={a.desktopAll}>All platforms</a>
+      </span>
+    )}
+    {a.desktopBuilds && <span class="btn btn-na" data-desktop-only hidden>Desktop app</span>}
+  </div>
+  <details class="more">
+    <summary>More about {a.name}</summary>
+    <p>{a.desc}</p>
+  </details>
+</article>
+
+<style>
+  .card {
+    position: relative;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-top: 4px solid var(--c1);
+    border-radius: 18px;
+    padding: 22px 22px 18px;
+    box-shadow: var(--oh-shadow-sm);
+    display: flex;
+    flex-direction: column;
+    scroll-margin-top: 88px;
+  }
+  .card:target {
+    box-shadow: 0 0 0 3px var(--c1), var(--oh-shadow-md);
+  }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .card-ico {
+    width: 52px;
+    height: 52px;
+    border-radius: 13px;
+    flex: 0 0 auto;
+  }
+  .kind {
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h3 {
+    font-size: 1.45rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+  .line {
+    color: var(--text);
+    font-size: 1.05rem;
+    line-height: 1.5;
+    margin: 14px 0 18px;
+    flex: 1;
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .desktop {
+    display: contents;
+  }
+  .btn {
+    font-family: var(--font-ui);
+    font-weight: 700;
+    font-size: 0.94rem;
+    border-radius: 11px;
+    padding: 11px 18px;
+    min-height: 44px;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid transparent;
+    transition:
+      transform 0.08s ease,
+      background 0.15s ease;
+  }
+  .btn:active {
+    transform: translateY(1px);
+  }
+  .btn:focus-visible {
+    outline: 3px solid var(--c1);
+    outline-offset: 2px;
+  }
+  .btn-web {
+    background: var(--oh-hearth-500);
+    color: #fff;
+  }
+  .btn-web:hover {
+    background: var(--oh-hearth-700);
+  }
+  .btn-apk {
+    background: #356b4e;
+    color: #fff;
+  }
+  .btn-apk:hover {
+    background: #284f3a;
+  }
+  .btn-desktop {
+    background: #3c615c;
+    color: #fff;
+  }
+  .btn-desktop:hover {
+    background: #2c4945;
+  }
+  .btn-ghost {
+    background: transparent;
+    color: var(--accent);
+    border-color: var(--border-str);
+  }
+  /* A desktop app seen on a phone: the page script shows this in place of
+     the download, as the old page did. */
+  .btn-na {
+    background: var(--border);
+    color: var(--text-sec);
+    pointer-events: none;
+  }
+  .more {
+    margin-top: 14px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+  }
+  .more summary {
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-sec);
+    padding: 6px 0;
+  }
+  .more p {
+    font-size: 0.95rem;
+    margin-top: 6px;
+  }
+</style>

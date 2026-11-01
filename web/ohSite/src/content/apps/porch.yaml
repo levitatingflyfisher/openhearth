@@ -1,0 +1,11 @@
+name: "Porch"
+kind: "Presence · preview"
+order: 16
+c1: "#E3A94D"
+c2: "#3B4A63"
+line: "Share with close friends when you’re free to talk. Still being tested."
+desc: "Turn the porch light on. Tap Available and the close friends already in your circle see it: no chat, no feed, no accounts. A pre-release preview for phone testing: it runs fully offline, and connecting your circle needs a small blind relay you stand up yourself. The Android app is the real one; the web preview stores keys in the browser (less private)."
+pwa: "https://levitatingflyfisher.github.io/porch/"
+pwaLabel: "Web preview: paused →"
+apk: "https://github.com/levitatingflyfisher/levitatingflyfisher.github.io/releases/download/porch-preview/Porch.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#E3A94D' opacity='.16'/><circle cx='256' cy='250' r='118' fill='#E3A94D' opacity='.30'/><rect x='246' y='96' width='20' height='34' rx='9' fill='#3B4A63'/><path d='M198 150 L314 150 L296 178 L216 178 Z' fill='#3B4A63'/><rect x='214' y='178' width='84' height='150' rx='12' fill='#3B4A63'/><rect x='234' y='198' width='44' height='110' rx='8' fill='#E3A94D'/><path d='M218 328 L294 328 L278 356 L234 356 Z' fill='#3B4A63'/></svg>"

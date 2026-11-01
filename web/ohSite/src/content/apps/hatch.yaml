@@ -1,0 +1,10 @@
+name: "Hatch"
+kind: "Times tables"
+order: 12
+c1: "#F2A93B"
+c2: "#C9862A"
+line: "Children learn their times tables and hatch a critter for each one."
+desc: "Times tables until they are automatic, not merely memorised. Every fact is an egg the child builds with her own hands (stack the rows, fold to double, slice a row off ten, rotate it into its slot) and answering it fast and right across enough separate days hatches it into a critter for the album. No streaks, no countdowns, no ads, no accounts; works offline."
+pwa: "https://levitatingflyfisher.github.io/Hatch/"
+apk: "https://github.com/levitatingflyfisher/Hatch/releases/latest/download/Hatch.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#F2A93B'/><g stroke='#3A2B25' stroke-linecap='round'><g stroke-width='30'><line x1='60' y1='322' x2='128' y2='390'/><line x1='128' y1='322' x2='60' y2='390'/></g><g stroke-width='14'><line x1='232' y1='198' x2='214' y2='152'/><line x1='280' y1='198' x2='298' y2='152'/></g></g><circle cx='214' cy='148' r='16' fill='#3A2B25'/><circle cx='298' cy='148' r='16' fill='#3A2B25'/><circle cx='256' cy='254' r='66' fill='#FF6F61'/><circle cx='234' cy='244' r='12' fill='#3A2B25'/><circle cx='278' cy='244' r='12' fill='#3A2B25'/><path d='M152 268 Q152 402 256 402 Q360 402 360 268 L334 296 L308 268 L282 296 L256 268 L230 296 L204 268 L178 296 Z' fill='#FDF1DC'/></svg>"

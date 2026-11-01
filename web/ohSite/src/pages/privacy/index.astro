@@ -1,0 +1,340 @@
+---
+import Base from '../../layouts/Base.astro';
+---
+
+<Base
+  title="Privacy · OpenHearth"
+  description="Where your data lives when you use OpenHearth apps."
+>
+
+<article class="privacy-page">
+  <header class="policy-header reveal">
+    <div class="container">
+      <p class="section-stag d1 reveal">OpenHearth</p>
+      <h1 class="d2 reveal">Where your data lives</h1>
+    </div>
+  </header>
+
+  <section class="policy-body">
+    <div class="container prose">
+
+      <p class="lead reveal">
+        OpenHearth apps keep what you put in them on your own device: in the
+        phone&rsquo;s app storage, or in your browser&rsquo;s storage when you use
+        an app on the web. There are no accounts, no ads and no tracking. We never
+        receive your data.
+      </p>
+
+      <p class="reveal">
+        Something leaves your device only when you use a feature that needs it:
+      </p>
+      <ul class="reveal">
+        <li><strong>A backup or an export:</strong> the file goes where you send it.</li>
+        <li>
+          <strong>Sync between your own devices, and Porch with close friends:</strong>
+          it is encrypted on your device first, so the relay that passes it on
+          can&rsquo;t read it.
+        </li>
+        <li>
+          <strong>Weather in WeatherGlass:</strong> the place you choose is sent to
+          the weather service to get its forecast.
+        </li>
+        <li>
+          <strong>Looking up a barcode:</strong> the code is sent to a product
+          database.
+        </li>
+        <li>
+          <strong>AI features, in the apps that have them:</strong> most run on
+          your device, after the app downloads what it needs. If you type in your
+          own key (a password-like code) from an online AI company, your question
+          goes to that company.
+        </li>
+      </ul>
+
+    </div>
+  </section>
+</article>
+
+</Base>
+
+<style>
+  /* ── Layout ──────────────────────────────────────────────────────────── */
+  .privacy-page {
+    padding-top: 80px; /* clear fixed nav */
+  }
+
+  .container {
+    width: 100%;
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ── Policy header ───────────────────────────────────────────────────── */
+  .policy-header {
+    padding: 56px 0 32px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .section-stag {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-family: var(--font-ui);
+    margin-bottom: 12px;
+  }
+
+  .policy-header h1 {
+    font-family: var(--font-heading);
+    font-size: clamp(32px, 5vw, 52px);
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.1;
+    letter-spacing: -0.8px;
+    margin-bottom: 12px;
+  }
+
+  .effective-date {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text-ter);
+  }
+
+  /* ── Prose body ──────────────────────────────────────────────────────── */
+  .policy-body {
+    padding: 48px 0 96px;
+  }
+
+  .prose {
+    max-width: 760px;
+  }
+
+  .lead {
+    font-size: 17px;
+    line-height: 1.75;
+    color: var(--text-sec);
+    margin-bottom: 48px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .prose h2 {
+    font-family: var(--font-heading);
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+    margin: 48px 0 16px;
+    padding-top: 8px;
+  }
+
+  .prose p {
+    font-size: 15.5px;
+    color: var(--text-sec);
+    line-height: 1.75;
+    margin-bottom: 16px;
+  }
+
+  .prose ul {
+    margin: 0 0 20px 0;
+    padding-left: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .prose li {
+    font-size: 15.5px;
+    color: var(--text-sec);
+    line-height: 1.65;
+  }
+
+  .prose a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    transition: color 0.2s;
+  }
+
+  .prose a:hover {
+    color: var(--accent-hover);
+  }
+
+  /* ── Three-tier architecture table ───────────────────────────────────── */
+  .tier-table {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 24px 0 32px;
+    border: 1px solid var(--border);
+    border-radius: var(--oh-r-xl);
+    overflow: hidden;
+  }
+
+  .tier-row {
+    display: grid;
+    grid-template-columns: 160px 1fr;
+    gap: 0;
+    padding: 24px;
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    align-items: start;
+  }
+
+  .tier-row:last-child {
+    border-bottom: none;
+  }
+
+  .tier-sync {
+    background: var(--bg-tinted);
+    border-left: 3px solid var(--accent);
+  }
+
+  .tier-name {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-right: 24px;
+  }
+
+  .tier-badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    padding: 4px 10px;
+    border-radius: 99px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    width: fit-content;
+  }
+
+  .tier-sync .tier-badge {
+    background: var(--accent);
+    color: var(--bg-card);
+  }
+
+  body[data-theme='dark'] .tier-sync .tier-badge {
+    color: var(--oh-dark-base);
+  }
+
+  .tier-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-ter);
+    font-family: var(--font-ui);
+  }
+
+  .tier-row ul {
+    margin: 0;
+    padding-left: 0;
+    list-style: none;
+    gap: 6px;
+  }
+
+  .tier-row li {
+    font-size: 14px;
+    color: var(--text-sec);
+    line-height: 1.6;
+    padding-left: 0;
+  }
+
+  /* ── Architecture callout quote ──────────────────────────────────────── */
+  .arch-quote {
+    margin: 32px 0;
+    padding: 24px 28px;
+    border-left: 3px solid var(--accent);
+    background: var(--bg-tinted);
+    border-radius: 0 var(--oh-r-lg) var(--oh-r-lg) 0;
+  }
+
+  .arch-quote p {
+    font-family: var(--font-heading);
+    font-size: 16px;
+    font-style: italic;
+    color: var(--text-sec);
+    line-height: 1.7;
+    margin: 0;
+  }
+
+  /* ── Code block ──────────────────────────────────────────────────────── */
+  .code-block {
+    background: var(--bg-tinted);
+    border: 1px solid var(--border);
+    border-radius: var(--oh-r-md);
+    padding: 14px 18px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text-sec);
+    overflow-x: auto;
+    margin: 8px 0 16px;
+  }
+
+  .code-block code {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    background: none;
+    padding: 0;
+  }
+
+  /* ── TODO placeholder ────────────────────────────────────────────────── */
+  .todo-placeholder {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--oh-amber-400);
+    background: var(--oh-amber-100);
+    padding: 2px 8px;
+    border-radius: var(--oh-r-sm);
+  }
+
+  body[data-theme='dark'] .todo-placeholder {
+    background: rgba(196, 154, 60, 0.15);
+    color: var(--oh-amber-400);
+  }
+
+  /* ── Responsive ──────────────────────────────────────────────────────── */
+  @media (max-width: 980px) {
+    .tier-row {
+      grid-template-columns: 140px 1fr;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .privacy-page {
+      padding-top: 72px;
+    }
+    .policy-header {
+      padding: 40px 0 24px;
+    }
+    .tier-row {
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+    .tier-name {
+      flex-direction: row;
+      align-items: center;
+      padding-right: 0;
+    }
+    .prose h2 {
+      font-size: 20px;
+      margin: 36px 0 12px;
+    }
+    .lead {
+      font-size: 16px;
+    }
+  }
+
+  /* ── Reduced motion ──────────────────────────────────────────────────── */
+  @media (prefers-reduced-motion: reduce) {
+    .reveal {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
+  }
+</style>

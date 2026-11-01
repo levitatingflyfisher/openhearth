@@ -1,0 +1,10 @@
+name: "WeatherGlass"
+kind: "Weather"
+order: 5
+c1: "#3D82C9"
+c2: "#21528A"
+line: "Today’s weather and the week ahead, with no tracking."
+desc: "A calm, local-first weather app for the home: the hours ahead and the week, on a screen painted from the real sky. Your location is rounded to a coarse cell before anything is sent; no account, no tracking. Read the sky, tell no one."
+pwa: "https://levitatingflyfisher.github.io/WeatherGlass/"
+apk: "https://github.com/levitatingflyfisher/WeatherGlass/releases/latest/download/WeatherGlass.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#3D82C9' opacity='.16'/><g stroke='#21528A' stroke-width='26' stroke-linecap='round'><line x1='292' y1='208' x2='324' y2='208'/><line x1='267' y1='269' x2='289' y2='291'/><line x1='206' y1='294' x2='206' y2='326'/><line x1='145' y1='269' x2='123' y2='291'/><line x1='120' y1='208' x2='88' y2='208'/><line x1='145' y1='147' x2='123' y2='125'/><line x1='206' y1='122' x2='206' y2='90'/><line x1='267' y1='147' x2='289' y2='125'/></g><circle cx='206' cy='208' r='70' fill='#21528A'/><rect x='196' y='298' width='238' height='70' rx='35' fill='#3D82C9'/><circle cx='288' cy='300' r='82' fill='#3D82C9'/><circle cx='286' cy='256' r='58' fill='#3D82C9'/><circle cx='212' cy='320' r='56' fill='#3D82C9'/><circle cx='360' cy='308' r='60' fill='#3D82C9'/></svg>"

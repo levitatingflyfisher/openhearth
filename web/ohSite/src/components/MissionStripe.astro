@@ -1,0 +1,267 @@
+<section class="mission" id="mission" aria-labelledby="mission-heading">
+  <div class="m-grain" aria-hidden="true"></div>
+  <div class="container">
+
+    <div class="m-header reveal">
+      <span class="m-stag">The Mission</span>
+      <h2 id="mission-heading">
+        Built for the families doing the <em>long, ordinary work</em> of raising the next generation.
+      </h2>
+      <p class="m-body">
+        OpenHearth makes free, local-first software for families.
+        The apps are free. Not freemium, not trial-ware:
+        just free, the way a library book is free.
+      </p>
+    </div>
+
+    <ol class="pillars" aria-label="Mission pillars">
+      <li class="pillar reveal d1">
+        <span class="p-num" aria-hidden="true">01</span>
+        <div class="p-text">
+          <h3>Designed with taste</h3>
+          <p>Software for family life should feel like it was made by someone who loves their family: warm, considered, without the churn and dark patterns of VC-backed apps. Every screen earns its place.</p>
+        </div>
+      </li>
+      <li class="pillar reveal d2">
+        <span class="p-num" aria-hidden="true">02</span>
+        <div class="p-text">
+          <h3>Genuinely free</h3>
+          <p>No subscription required. No feature-locked tier. No "upgrade to unlock" nags. The apps ask for nothing. Free the way a library book is free.</p>
+        </div>
+      </li>
+      <li class="pillar reveal d3">
+        <span class="p-num" aria-hidden="true">03</span>
+        <div class="p-text">
+          <h3>For real households</h3>
+          <p>Designed for families with three, four, five kids instead of the minimalist DINK market. Built around marriage as the organizing unit, by people who use the apps in their own homes.</p>
+        </div>
+      </li>
+      <li class="pillar reveal d4">
+        <span class="p-num" aria-hidden="true">04</span>
+        <div class="p-text">
+          <h3>Open &amp; private</h3>
+          <p>MIT licensed and fully auditable. Your data lives on your device by default; the server is a dumb encrypted relay that stores ciphertext and nothing else. Read the code. Trust the math.</p>
+        </div>
+      </li>
+    </ol>
+
+  </div>
+</section>
+
+<style>
+  /* ── Section shell ───────────────────────────────────────────── */
+  .mission {
+    position: relative;
+    background: linear-gradient(160deg, var(--oh-hearth-600) 0%, var(--oh-hearth-700) 100%);
+    padding: 100px 0 96px;
+    overflow: hidden;
+    isolation: isolate;
+  }
+
+  /* Grain overlay — sits above the gradient, below the text */
+  .m-grain {
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Soft radial blooms */
+  .mission::before {
+    content: '';
+    position: absolute;
+    top: -120px;
+    right: -100px;
+    width: 480px;
+    height: 480px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,255,255,0.07) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .mission::after {
+    content: '';
+    position: absolute;
+    bottom: -100px;
+    left: 6%;
+    width: 360px;
+    height: 360px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,255,255,0.05) 0%, transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Ensure content is above grain/blooms */
+  .container {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* ── Header block ────────────────────────────────────────────── */
+  .m-header {
+    max-width: 680px;
+    margin-bottom: 64px;
+  }
+
+  .m-stag {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--oh-hearth-200);
+    margin-bottom: 18px;
+    opacity: 0.9;
+  }
+
+  .m-header h2 {
+    font-family: var(--font-heading);
+    font-size: clamp(26px, 3.4vw, 44px);
+    font-weight: 700;
+    color: var(--oh-linen-50);
+    line-height: 1.18;
+    letter-spacing: -0.4px;
+    margin-bottom: 22px;
+  }
+
+  .m-header h2 em {
+    font-style: italic;
+    color: var(--oh-hearth-200);
+  }
+
+  .m-body {
+    font-size: 16px;
+    color: rgba(251, 248, 244, 0.78);
+    line-height: 1.75;
+    margin-bottom: 24px;
+    max-width: 620px;
+  }
+
+  .m-sig {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: rgba(251, 248, 244, 0.52);
+    line-height: 1.6;
+    letter-spacing: 0.02em;
+  }
+
+  .m-sig-div {
+    margin: 0 4px;
+    opacity: 0.6;
+  }
+
+  /* ── Pillars grid ────────────────────────────────────────────── */
+  .pillars {
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 2px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: var(--oh-r-xl);
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .pillar {
+    display: flex;
+    align-items: flex-start;
+    gap: 18px;
+    padding: 32px 28px;
+    background: rgba(0, 0, 0, 0.10);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    transition: background 0.25s;
+  }
+
+  .pillar:hover {
+    background: rgba(0, 0, 0, 0.18);
+  }
+
+  .p-num {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--oh-hearth-300);
+    opacity: 0.8;
+    flex-shrink: 0;
+    padding-top: 3px;
+    letter-spacing: 0.04em;
+  }
+
+  .p-text h3 {
+    font-family: var(--font-ui);
+    font-size: 14.5px;
+    font-weight: 700;
+    color: var(--oh-linen-50);
+    margin-bottom: 7px;
+    line-height: 1.3;
+    letter-spacing: 0.01em;
+  }
+
+  .p-text p {
+    font-size: 13.5px;
+    color: rgba(251, 248, 244, 0.64);
+    line-height: 1.6;
+    margin: 0;
+  }
+
+  /* ── Dark-theme parity ───────────────────────────────────────── */
+  /*
+   * In light mode: dark-on-dark by design — terracotta hearth gradient,
+   *   linen-50 headings, semi-transparent body text.
+   * In dark mode: the gradient deepens slightly but stays dark; text keeps
+   *   the same linen-50 / rgba(251,248,244) palette since it's always on
+   *   the dark gradient surface — no semantic token flips needed here.
+   *   We do nudge the gradient slightly to read against the dark chrome.
+   */
+  :global(body[data-theme='dark']) .mission {
+    background: linear-gradient(160deg, var(--oh-hearth-700) 0%, #4A1E14 100%);
+  }
+
+  :global(body[data-theme='dark']) .pillar {
+    background: rgba(0, 0, 0, 0.25);
+    border-color: rgba(255, 255, 255, 0.06);
+  }
+
+  :global(body[data-theme='dark']) .pillar:hover {
+    background: rgba(0, 0, 0, 0.38);
+  }
+
+  /* ── Responsive ──────────────────────────────────────────────── */
+  @media (max-width: 980px) {
+    .mission {
+      padding: 80px 0 72px;
+    }
+    .pillars {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    .pillar {
+      padding: 26px 22px;
+      gap: 14px;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .mission {
+      padding: 64px 0 56px;
+    }
+    .m-header {
+      margin-bottom: 44px;
+    }
+    .pillars {
+      grid-template-columns: 1fr;
+    }
+    .pillar {
+      padding: 22px 20px;
+    }
+  }
+
+  /* ── Reduced motion ──────────────────────────────────────────── */
+  @media (prefers-reduced-motion: reduce) {
+    .pillar {
+      transition: none;
+    }
+  }
+</style>

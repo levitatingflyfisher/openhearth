@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b0f1a">
+  <title>NightGlass has moved</title>
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- The move page, at the old address for good: tools/build-move-page.mjs
+       puts it in the landing site at /move/nightglass/. It reads this
+       browser's NightGlass data and writes nothing. -->
+  <main class="move-page">
+    <h1>NightGlass has moved</h1>
+    <p>NightGlass now lives at nightglass.familyflourishing.org.</p>
+    <p id="found" role="status">Counting your records…</p>
+    <p>To bring them across, save a backup file here. Then go to the new
+      address and open the file there.</p>
+    <button id="save" type="button" class="primary">Save a backup file</button>
+    <p class="sub">Nothing here is deleted. Your data stays in this browser.</p>
+    <p><a class="chip" href="https://nightglass.familyflourishing.org/"
+          target="_blank" rel="noopener">Go to nightglass.familyflourishing.org</a></p>
+  </main>
+  <script type="module" src="move.js"></script>
+</body>
+</html>

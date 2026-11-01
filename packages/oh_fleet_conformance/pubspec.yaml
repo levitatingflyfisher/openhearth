@@ -1,0 +1,18 @@
+name: oh_fleet_conformance
+description: "OpenHearth fleet conformance suite \u2014 a dev-dependency test package\
+  \ that turns the fleet's standards (style grammar, backup envelope, size budgets,\
+  \ permission allowlists, harness canon) into failing-able tests instead of documents\
+  \ that drift."
+version: 0.18.0
+publish_to: none
+environment:
+  sdk: ^3.10.7
+  flutter: '>=3.32.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_test:
+    sdk: flutter
+dev_dependencies:
+  flutter_lints: ^6.0.0
+resolution: workspace

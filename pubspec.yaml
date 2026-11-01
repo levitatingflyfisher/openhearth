@@ -1,0 +1,45 @@
+name: openhearth_workspace
+publish_to: none
+environment:
+  sdk: ^3.10.7
+workspace:
+- packages/ohStyle/openhearth_design
+- packages/sanctuary_auth_core
+- packages/sanctuary_backup_ui
+- packages/oh_fleet_conformance
+- packages/oh_release_kit
+- packages/elo_engine
+- packages/domovoi
+- apps/Bulwark
+- apps/Furrow
+- apps/Glass
+- apps/Hatch
+- apps/Hatch/packages/mastery_core
+- apps/Lilt
+- apps/Lullaby
+- apps/Mantle
+- apps/Peckish
+- apps/PunctumTemporis
+- apps/Reckon
+- apps/Reckon/relay
+- apps/StillLife
+- apps/Sundial
+- apps/Trellis/app
+- apps/Trellis/packages/backup_core
+- apps/Trellis/packages/brain_wiring
+- apps/Trellis/packages/comms_core
+- apps/Trellis/packages/intake_core
+- apps/Trellis/packages/jobs_core
+- apps/Trellis/packages/korean_g2p
+- apps/Trellis/packages/loom_core
+- apps/Trellis/packages/mandarin_g2p
+- apps/Trellis/packages/ml_runtime
+- apps/Trellis/packages/russian_g2p
+- apps/Trellis/packages/skein
+- apps/Trellis/packages/stardict_core
+- apps/Trellis/packages/study_core
+- apps/Trellis/packages/transcribe_core
+- apps/Trellis/packages/whisper_ffi
+- apps/porch/app
+dependency_overrides:
+  google_mlkit_commons: ^0.12.0

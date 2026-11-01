@@ -1,0 +1,39 @@
+# Astro build output
+dist/
+.astro/
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+
+# Cloudflare
+.wrangler/
+
+# Brainstorm session artifacts
+.superpowers/
+
+# Local working artifacts — never shipped (org convention)
+docs/superpowers/
+CLAUDE.md
+
+# Design prototypes (reference only, kept local — bundled/large)
+OpenHearth _standalone_.html
+openHearthLandingView.html

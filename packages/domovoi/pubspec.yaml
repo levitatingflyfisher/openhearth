@@ -1,0 +1,19 @@
+name: domovoi
+description: "Discernment \u2014 family cognition for family matters. A model-agnostic\
+  \ control plane for household AI: one Brain seam for apps, verified model acquisition,\
+  \ and the encrypted \"stove\" protocol to a home server."
+version: 0.1.0
+repository: https://github.com/levitatingflyfisher/DomovoiDiscernment
+environment:
+  sdk: ^3.10.7
+executables:
+  stove: stove
+dependencies:
+  cryptography: 2.9.0
+  bip39_mnemonic: 4.1.0
+  dio: ^5.4.0
+  args: ^2.4.0
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.0
+resolution: workspace

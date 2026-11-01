@@ -1,0 +1,113 @@
+/*
+ * OpenHearth Design Tokens (ohStyle)
+ *
+ * Snapshot of OpenHearth/ohStyle pending convergence with the upstream token source.
+ * Primitive color ramps, elevation, radii, motion, and typography stacks,
+ * plus a light/dark semantic layer driven by [data-theme] on <body>.
+ */
+:root {
+  /* Hearth — primary brand (terracotta) */
+  --oh-hearth-50:  #FDF5F3;
+  --oh-hearth-100: #F8E8E3;
+  --oh-hearth-200: #EDCDC5;
+  --oh-hearth-300: #D9A99E;
+  --oh-hearth-400: #CD8366;
+  --oh-hearth-500: #9E4D2C;
+  --oh-hearth-600: #893F21;
+  --oh-hearth-700: #6E2F22;
+  --oh-hearth-800: #511F15;
+  --oh-hearth-900: #370F09;
+
+  /* Linen — warm neutrals */
+  --oh-linen-50:  #FBF8F4;
+  --oh-linen-100: #F5EFE6;
+  --oh-linen-200: #EAE1D4;
+  --oh-linen-300: #C7B9A0;
+  --oh-linen-400: #B3A08A;
+  --oh-linen-500: #8C7B65;
+  --oh-linen-600: #6E5F4C;
+  --oh-linen-700: #4D3E2E;
+  --oh-linen-800: #35281C;
+  --oh-linen-900: #2C1810;
+
+  /* Sage — nature, success, live status */
+  --oh-sage-100: #E0EFEA;
+  --oh-sage-200: #BED8CE;
+  --oh-sage-400: #7BAF96;
+  --oh-sage-500: #5E9478;
+  --oh-sage-600: #4A7B65;
+
+  /* Slate — informational secondary */
+  --oh-slate-100: #DDE5F1;
+  --oh-slate-300: #97ACCA;
+  --oh-slate-500: #5C7599;
+  --oh-slate-700: #3A5070;
+
+  /* Accents */
+  --oh-amber-100: #F5E9C8;
+  --oh-amber-400: #C49A3C;
+  --oh-red-100:   #F5DDD9;
+  --oh-red-500:   #B0382A;
+
+  /* Dark surfaces */
+  --oh-dark-base:       #1C1007;
+  --oh-dark-card:       #2A1A0D;
+  --oh-dark-elev:       #3A2215;
+  --oh-dark-high:       #4A2E1F;
+  --oh-dark-border:     #6B4A34;
+  --oh-dark-border-sub: #5A3A28;
+
+  /* Elevation — warm-tinted */
+  --oh-shadow-xs: 0 1px 2px rgba(44, 24, 16, 0.06);
+  --oh-shadow-sm: 0 1px 4px rgba(44, 24, 16, 0.09);
+  --oh-shadow-md: 0 4px 14px rgba(44, 24, 16, 0.10);
+  --oh-shadow-lg: 0 12px 36px rgba(44, 24, 16, 0.13);
+  --oh-shadow-xl: 0 22px 60px rgba(44, 24, 16, 0.15);
+
+  /* Radii */
+  --oh-r-sm:  4px;
+  --oh-r-md:  8px;
+  --oh-r-lg:  12px;
+  --oh-r-xl:  16px;
+  --oh-r-2xl: 24px;
+
+  /* Motion */
+  --ease-out:    cubic-bezier(0, 0, 0.2, 1);
+  --ease-in:     cubic-bezier(0.4, 0, 1, 1);
+  --ease-std:    cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-settle: cubic-bezier(0.34, 1.36, 0.64, 1);
+
+  /* Fonts */
+  --font-heading: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-ui:      'Nunito', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono:    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Semantic — light theme (default) */
+  --bg:           var(--oh-linen-50);
+  --bg-card:      #FFFFFF;
+  --bg-tinted:    var(--oh-linen-100);
+  --bg-inset:     var(--oh-hearth-50);
+  --text:         var(--oh-linen-900);
+  --text-sec:     var(--oh-linen-700);
+  --text-ter:     var(--oh-linen-500);
+  --border:       var(--oh-linen-200);
+  --border-str:   var(--oh-linen-300);
+  --accent:       var(--oh-hearth-500);
+  --accent-hover: var(--oh-hearth-600);
+  --accent-soft:  var(--oh-hearth-100);
+}
+
+body[data-theme='dark'] {
+  --bg:           var(--oh-dark-base);
+  --bg-card:      var(--oh-dark-card);
+  --bg-tinted:    var(--oh-dark-elev);
+  --bg-inset:     var(--oh-dark-high);
+  --text:         var(--oh-linen-100);
+  --text-sec:     var(--oh-linen-300);
+  --text-ter:     var(--oh-linen-500);
+  --border:       var(--oh-dark-border-sub);
+  --border-str:   var(--oh-dark-border);
+  --accent:       var(--oh-hearth-400);
+  --accent-hover: var(--oh-hearth-300);
+  --accent-soft:  rgba(196, 123, 106, 0.12);
+}

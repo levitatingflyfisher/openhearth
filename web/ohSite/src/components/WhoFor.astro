@@ -1,0 +1,178 @@
+---
+// WhoFor.astro — "Who this is for" section (plan §3, verbatim copy)
+---
+
+<section class="whofor" aria-labelledby="whofor-heading">
+  <div class="container">
+    <div class="whofor-inner">
+
+      <p class="stag reveal d1">Who this is for</p>
+
+      <h2 class="heading reveal d2" id="whofor-heading">
+        Married couples. Big families.
+        <em>Families who want to be big.</em>
+        People who think children are
+        <span class="underline-accent">a blessing,</span>
+        not a carbon footprint.
+      </h2>
+
+      <p class="sub reveal d3">
+        If that's you, you've been poorly served by consumer software for a long
+        time. Apps built for DINKs, optimized for attention, designed around the
+        assumption that a family is a liability. We think the opposite, and we
+        build accordingly.
+      </p>
+
+      <ul class="checklist reveal d4" role="list">
+        <li class="check-item">
+          <span class="check-icon" aria-hidden="true">✓</span>
+          <span>Designed for households with three, four, five kids, not just one</span>
+        </li>
+        <li class="check-item">
+          <span class="check-icon" aria-hidden="true">✓</span>
+          <span>Built around marriage as the organizing unit</span>
+        </li>
+        <li class="check-item">
+          <span class="check-icon" aria-hidden="true">✓</span>
+          <span>Shipped by people who have kids and use the apps themselves</span>
+        </li>
+        <li class="check-item">
+          <span class="check-icon" aria-hidden="true">✓</span>
+          <span>Made by people who take the fertility crisis seriously</span>
+        </li>
+      </ul>
+
+    </div>
+  </div>
+</section>
+
+<style>
+  .whofor {
+    padding: 88px 0;
+    background: var(--bg-tinted);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .whofor-inner {
+    max-width: 680px;
+  }
+
+  /* Eyebrow stag */
+  .stag {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 18px;
+    font-family: var(--font-ui);
+  }
+
+  /* h2 */
+  .heading {
+    font-family: var(--font-heading);
+    font-size: clamp(26px, 4vw, 42px);
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.5px;
+    color: var(--text);
+    margin-bottom: 24px;
+  }
+
+  .heading em {
+    font-style: italic;
+    color: var(--accent);
+  }
+
+  /* "a blessing," underline accent */
+  .underline-accent {
+    display: inline;
+    background-image: linear-gradient(
+      to right,
+      var(--accent) 0%,
+      var(--accent) 100%
+    );
+    background-repeat: no-repeat;
+    background-position: 0 100%;
+    background-size: 100% 2px;
+    padding-bottom: 1px;
+  }
+
+  /* Sub paragraph */
+  .sub {
+    font-family: var(--font-ui);
+    font-size: 16px;
+    line-height: 1.7;
+    color: var(--text-sec);
+    margin-bottom: 32px;
+    max-width: 600px;
+  }
+
+  /* Checklist */
+  .checklist {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .check-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    font-family: var(--font-ui);
+    font-size: 15.5px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  .check-icon {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 800;
+    margin-top: 1px;
+  }
+
+  /* Responsive — 980px */
+  @media (max-width: 980px) {
+    .whofor {
+      padding: 72px 0;
+    }
+    .whofor-inner {
+      max-width: 100%;
+    }
+  }
+
+  /* Responsive — 640px */
+  @media (max-width: 640px) {
+    .whofor {
+      padding: 56px 0;
+    }
+    .heading {
+      font-size: clamp(22px, 6vw, 32px);
+    }
+    .sub {
+      font-size: 15px;
+    }
+    .check-item {
+      font-size: 15px;
+    }
+  }
+
+  /* Reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    .whofor * {
+      transition: none !important;
+      animation: none !important;
+    }
+  }
+</style>

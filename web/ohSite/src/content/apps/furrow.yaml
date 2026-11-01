@@ -1,0 +1,10 @@
+name: "Furrow"
+kind: "Daily habits"
+order: 2
+c1: "#B07A2E"
+c2: "#6E4A19"
+line: "Track the habits you choose, one tick a day, on a simple grid."
+desc: "A calm daily grid for the habits and virtues you mean to keep: Franklin's book of days, Aristotle's “we are what we repeatedly do.” Tick, count, or time each one; a good week looks like a furrow cut clean."
+pwa: "https://levitatingflyfisher.github.io/Furrow/"
+apk: "https://github.com/levitatingflyfisher/Furrow/releases/latest/download/Furrow.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#B07A2E' opacity='.16'/><path d='M130 160 Q256 126 382 160 M130 224 Q256 190 382 224 M130 352 Q256 318 382 352' stroke='#B07A2E' stroke-width='40' stroke-linecap='round' fill='none'/><path d='M130 288 Q256 254 382 288' stroke='#6E4A19' stroke-width='40' stroke-linecap='round' fill='none'/></svg>"

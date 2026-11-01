@@ -1,0 +1,10 @@
+name: "Reckon"
+kind: "Decision journal"
+order: 14
+c1: "#7E94A8"
+c2: "#536B82"
+line: "Write down a big decision and what you think will happen. Later, see how it went."
+desc: "Think a choice through, write down what you expect, and learn from how it actually turned out. The web app is your full private journal; the Android app adds an on-device LLM that guides the forecast: no account either way."
+pwa: "https://levitatingflyfisher.github.io/Reckon/"
+apk: "https://github.com/levitatingflyfisher/Reckon/releases/latest/download/Reckon.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#7E94A8' opacity='.16'/><rect x='120' y='148' width='272' height='26' rx='13' fill='#536B82'/><circle cx='256' cy='148' r='20' fill='#536B82'/><rect x='242' y='174' width='28' height='164' fill='#536B82'/><polygon points='228,338 284,338 316,372 196,372' fill='#536B82'/><rect x='180' y='372' width='152' height='20' rx='10' fill='#536B82'/><path d='M150 176 L110 232 A40 18 0 0 0 190 232 Z' fill='#7E94A8'/><path d='M362 176 L322 232 A40 18 0 0 0 402 232 Z' fill='#7E94A8'/></svg>"

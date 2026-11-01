@@ -1,0 +1,10 @@
+name: "Lullaby"
+kind: "Baby tracker"
+order: 10
+c1: "#9A8FB5"
+c2: "#6E5F90"
+line: "Log your baby’s feeds, sleep and diapers."
+desc: "A FLOSS baby tracker for exhausted parents: feeds, sleep, and diapers, all on your device."
+pwa: "https://levitatingflyfisher.github.io/Lullaby/"
+apk: "https://github.com/levitatingflyfisher/Lullaby/releases/latest/download/Lullaby.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#9A8FB5' opacity='.16'/><path d='M311 127 A140 140 0 1 0 311 385 A132 132 0 0 1 311 127 Z' fill='#9A8FB5'/><path d='M385 120 L394 151 L425 160 L394 169 L385 200 L376 169 L345 160 L376 151 Z' fill='#6E5F90'/></svg>"

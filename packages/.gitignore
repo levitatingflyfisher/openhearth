@@ -1,0 +1,9 @@
+.dart_tool/
+build/
+coverage/
+.flutter-plugins-dependencies
+pubspec.lock
+*.iml
+.idea/
+CLAUDE.md
+docs/superpowers/

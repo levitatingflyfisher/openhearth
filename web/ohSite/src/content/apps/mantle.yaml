@@ -1,0 +1,10 @@
+name: "Mantle"
+kind: "Shared aesthetic"
+order: 15
+c1: "#A57A8C"
+c2: "#7A4F62"
+line: "Choose between pictures of homes, rooms and clothes to find your family’s style."
+desc: "Discover your family's shared aesthetic together: privately, with no account."
+pwa: "https://levitatingflyfisher.github.io/Mantle/"
+apk: "https://github.com/levitatingflyfisher/Mantle/releases/latest/download/Mantle.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#A57A8C' opacity='.16'/><rect x='150' y='150' width='212' height='212' rx='46' transform='rotate(45 256 256)' fill='#7A4F62'/><rect x='192' y='192' width='128' height='128' rx='30' transform='rotate(45 256 256)' fill='#A57A8C'/><rect x='228' y='228' width='56' height='56' rx='15' transform='rotate(45 256 256)' fill='#7A4F62'/></svg>"

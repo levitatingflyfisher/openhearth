@@ -1,0 +1,81 @@
+---
+// The top of the landing page. The heading is the old hand-kept page's;
+// the intro is the final one from 14 Nov 2026 (blind-read).
+---
+
+<header class="hero">
+  <svg class="mark" viewBox="0 0 512 512" aria-hidden="true">
+    <rect width="512" height="512" rx="104" fill="#C47B6A" opacity=".14"></rect>
+    <path d="M256 96c-36 0-66 54-66 128 0 56 20 102 66 148 46-46 66-92 66-148 0-74-30-128-66-128z" fill="#C47B6A"></path>
+    <path d="M256 150c-18 0-33 37-33 83 0 35 11 64 33 91 22-27 33-56 33-91 0-46-15-83-33-83z" fill="#A85040"></path>
+  </svg>
+  <h1>Open<span class="hearth">Hearth</span></h1>
+  <p class="tagline">Calm, private tools for the life of a home.</p>
+  <p class="lede">Free apps for family life. Open any of them in your browser, on a phone or a computer. What you save stays on your device unless you choose to share it. No accounts, no ads.</p>
+  <div class="values">
+    <span class="chip">Local-first</span>
+    <span class="chip">No ads, no tracking</span>
+    <span class="chip">No account needed</span>
+    <span class="chip">Open source</span>
+  </div>
+</header>
+
+<style>
+  .hero {
+    padding: 112px 0 40px;
+    text-align: center;
+  }
+  .mark {
+    width: 60px;
+    height: 60px;
+    margin: 0 auto 22px;
+    display: block;
+    filter: drop-shadow(0 4px 10px rgba(168, 80, 64, 0.25));
+  }
+  h1 {
+    font-weight: 600;
+    font-size: clamp(2.6rem, 6vw, 4rem);
+    letter-spacing: -0.02em;
+    margin: 0 0 8px;
+    line-height: 1.04;
+  }
+  .hearth {
+    color: var(--accent);
+  }
+  .tagline {
+    font-family: var(--font-heading);
+    font-style: italic;
+    font-weight: 500;
+    font-size: clamp(1.15rem, 2.6vw, 1.5rem);
+    color: var(--text-sec);
+    margin: 0 auto;
+    max-width: 30ch;
+  }
+  .lede {
+    margin: 26px auto 0;
+    max-width: 56ch;
+    font-size: 1.05rem;
+  }
+  .values {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+    margin: 30px 0 0;
+  }
+  .chip {
+    font-size: 0.86rem;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 7px 15px;
+    box-shadow: var(--oh-shadow-xs);
+  }
+  @media (max-width: 640px) {
+    .hero {
+      padding: 92px 0 24px;
+    }
+  }
+</style>

@@ -1,0 +1,22 @@
+{
+  "name": "ohsite",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenHearth app hub",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "test": "node --test tests/text/claims.test.mjs tests/text/cards.test.mjs tests/text/owner.test.mjs tests/text/links.test.mjs tests/text/landing.test.mjs tests/text/legal.test.mjs",
+    "verify": "npm run build && npm test",
+    "landing": "npm run verify && node scripts/landing.mjs ../levitatingflyfisher.github.io"
+  },
+  "dependencies": {
+    "astro": "^7.4.12"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

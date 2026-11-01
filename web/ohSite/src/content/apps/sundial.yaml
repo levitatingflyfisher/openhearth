@@ -1,0 +1,10 @@
+name: "Sundial"
+kind: "Outdoor time"
+order: 1
+c1: "#D9A14E"
+c2: "#B07A2E"
+line: "Time how long you spend outside, and watch the hours add up over the year."
+desc: "A gentle, local-first tracker that nudges the whole family toward more time outdoors."
+pwa: "https://levitatingflyfisher.github.io/Sundial/"
+apk: "https://github.com/levitatingflyfisher/Sundial/releases/latest/download/Sundial.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1024 1024'><rect width='1024' height='1024' fill='#F5F0E8'/><path d='M 212 680 A 300 300 0 0 1 812 680' stroke='#C8B89A' stroke-width='52' fill='none' stroke-linecap='round'/><path d='M 212 680 A 300 300 0 0 1 512 380' stroke='#5E9478' stroke-width='52' fill='none' stroke-linecap='round'/><line x1='164' y1='680' x2='860' y2='680' stroke='#C8B89A' stroke-width='10' stroke-linecap='round'/><line x1='512' y1='680' x2='512' y2='380' stroke='#5E9478' stroke-width='14' stroke-opacity='0.28' stroke-linecap='round'/><circle cx='512' cy='380' r='50' fill='#5E9478'/></svg>"

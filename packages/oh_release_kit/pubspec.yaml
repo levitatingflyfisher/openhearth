@@ -1,0 +1,15 @@
+name: oh_release_kit
+description: 'The OpenHearth fleet''s release checks as one command-line tool: version,
+  shared package versions, leak scan, web build, APK and clean export. The app''s
+  folder is the argument, so every app releases the same way.'
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.10.7
+dependencies:
+  path: ^1.9.0
+  yaml: ^3.1.2
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.26.0
+resolution: workspace

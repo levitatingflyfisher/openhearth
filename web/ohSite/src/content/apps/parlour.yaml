@@ -1,0 +1,10 @@
+name: "Parlour"
+kind: "Family games"
+order: 7
+c1: "#3E8E78"
+c2: "#2F5D50"
+line: "Classic games like tic-tac-toe to pass around the family table."
+desc: "A calm cupboard of pass-and-play classic games for the family table: tic-tac-toe and friends, with more on the shelf. Play the computer or hand the device around. Local-first, offline, no accounts, no ads."
+pwa: "https://levitatingflyfisher.github.io/Parlour/"
+apk: "https://github.com/levitatingflyfisher/Parlour/releases/latest/download/Parlour.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#3E8E78' opacity='.16'/><circle cx='204' cy='300' r='74' fill='none' stroke='#2F5D50' stroke-width='30'/><g stroke='#3E8E78' stroke-width='34' stroke-linecap='round'><line x1='262' y1='168' x2='356' y2='262'/><line x1='356' y1='168' x2='262' y2='262'/></g></svg>"

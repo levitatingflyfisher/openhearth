@@ -1,0 +1,10 @@
+name: "StillLife"
+kind: "Home inventory"
+order: 13
+c1: "#C08552"
+c2: "#965B2E"
+line: "A list of everything in your home, for insurance or a move."
+desc: "Know what you own, where it is, and what it's worth: a private home inventory kept on-device. The web app does the full catalogue: rooms, containers, items, photos, and the insurance export. The Android app adds camera capture, barcode scanning, receipt reading, and LAN sync between your devices."
+pwa: "https://levitatingflyfisher.github.io/StillLife/"
+apk: "https://github.com/levitatingflyfisher/StillLife/releases/latest/download/StillLife.apk"
+icon: "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#C08552' opacity='.16'/><rect x='160' y='200' width='192' height='172' rx='10' fill='#C08552'/><rect x='170' y='200' width='172' height='26' fill='#965B2E'/><polygon points='160,200 256,200 214,140 118,140' fill='#965B2E'/><polygon points='256,200 352,200 394,140 298,140' fill='#965B2E'/></svg>"

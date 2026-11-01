@@ -1,0 +1,42 @@
+# Dart / Flutter / Pub Workspace
+.dart_tool/
+.packages
+build/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/Flutter/ephemeral/
+**/macos/Flutter/ephemeral/
+**/linux/flutter/ephemeral/
+**/windows/flutter/ephemeral/
+**/GeneratedPluginRegistrant.java
+**/GeneratedPluginRegistrant.m
+**/GeneratedPluginRegistrant.h
+**/GeneratedPluginRegistrant.swift
+*.iml
+.idea/
+.vscode/
+.DS_Store
+
+# Generated build artifacts (not committed)
+**/build/
+**/.dart_tool/
+**/node_modules/
+**/.astro/
+**/dist/
+**/target/
+
+# Android / Gradle local artifacts
+**/android/.gradle/
+**/android/local.properties
+**/android/key.properties
+**/android/captures/
+**/android/gradlew
+**/android/gradlew.bat
+
+# OS / editor noise
+*.swp
+*~
+.env
+.env.*

@@ -1,0 +1,80 @@
+---
+// The landing page: the one link on the family's Christmas card
+// (board-0176). Built into the landing repo by `npm run landing`.
+import { getCollection } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import Hero from '../components/Hero.astro';
+import BeliefBand from '../components/BeliefBand.astro';
+import WhoFor from '../components/WhoFor.astro';
+import MissionStripe from '../components/MissionStripe.astro';
+import AppCard from '../components/AppCard.astro';
+
+const apps = (await getCollection('apps')).sort((a, b) => a.data.order - b.data.order);
+---
+
+<Base
+  title="OpenHearth: calm, local-first tools for family life"
+  description="OpenHearth builds free, private, local-first tools for households: reading, learning, and home life. No ads, no tracking, no accounts. Open by default."
+>
+  <main>
+    <div class="container"><Hero /></div>
+    <BeliefBand />
+    <WhoFor />
+    <section class="container apps-section">
+      <h2 class="section" id="apps">The apps</h2>
+      <div class="apps">
+        {apps.map((app) => <AppCard app={app} />)}
+      </div>
+    </section>
+    <MissionStripe />
+  </main>
+  <script is:inline>
+    // glean is a desktop app. On a computer, offer the build for this OS
+    // (with "All platforms" beside it). On a phone, say "Desktop app" in its
+    // place, as the old page did. Without this script, the Linux build and
+    // "All platforms" show.
+    (function () {
+      var isDesktop = window.matchMedia('(min-width:900px) and (pointer:fine)').matches;
+      var ua = navigator.userAgent;
+      var os = /Windows/i.test(ua) ? 'win' : /Mac/i.test(ua) ? 'mac' : 'linux';
+      var label = { win: 'Windows', mac: 'macOS', linux: 'Linux' }[os];
+      document.querySelectorAll('[data-desktop]').forEach(function (box) {
+        if (isDesktop) {
+          var link = box.querySelector('[data-' + os + ']');
+          link.href = link.dataset[os];
+          link.textContent = 'Download for ' + label + ' ↓';
+        } else {
+          box.hidden = true;
+          var na = box.parentElement.querySelector('[data-desktop-only]');
+          if (na) na.hidden = false;
+        }
+      });
+    })();
+  </script>
+</Base>
+
+<style>
+  .apps-section {
+    padding-bottom: 72px;
+  }
+  .section {
+    font-weight: 600;
+    font-size: 1.05rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-sec);
+    margin: 40px 0 20px;
+    text-align: center;
+    scroll-margin-top: 88px;
+  }
+  .apps {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+    gap: 20px;
+  }
+  @media (max-width: 640px) {
+    .apps {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
