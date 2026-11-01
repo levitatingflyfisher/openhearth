@@ -1,0 +1,86 @@
+# Limitations
+
+An honest list of what Furrow does not do, cannot do today, or does imperfectly.
+Read this before adopting — the goal is to save you an afternoon of discovery.
+For the shape of what's built vs. aspirational, see the
+[Vision scorecard](../VISION.md#honest-scorecard--built-vs-aspirational).
+
+## No sync, no server-side backup, no multi-device
+
+- **Local-only.** Furrow has no cloud of its own, no sync, and no server-side backup by design
+  ([ADR-0004](adr/0004-local-first-ghost-mode.md)). Android itself may back
+  up the app's data to Google, if the phone's owner allows it in Android
+  settings; that is Android's choice, not Furrow's. Settings → Backup
+  can export an encrypted `.ohbk` copy of your habits, marks, and awards under
+  a recovery phrase you generate and keep yourself
+  ([ADR-0008](adr/0008-encrypted-backup-seed-phrase.md)) — but nothing moves
+  automatically. If you lose or wipe the device without having made a backup
+  first, the data is gone. There is no "log in on your new
+  phone and it's all there" — restoring means finding your own backup file
+  and, for an encrypted one, your recovery phrase. Lose the phrase and the
+  encrypted backup is unreadable; there is no reset.
+- **Single-user.** There are no profiles. A shared family device shares one ghost
+  profile; Furrow can't tell family members apart.
+- **Token / Named tiers are stubs.** `GhostAuthRepository` is the only
+  implementation; `upgradeToToken` / `upgradeToNamed` throw `UnimplementedError`.
+
+## Schedules and streaks
+
+- **`weeklyCount` is schema-only.** A habit you do "N times a week" is not yet
+  expressible in the UI — v1 treats `weeklyCount` as "any day". The columns exist;
+  the week-grained UI and week streak do not.
+- **Streaks follow fixed-day schedules only.** A day off the schedule is not a
+  miss (so Mon/Wed/Fri keeps its run), but `weeklyCount` habits are still "any
+  day", so their streak counts calendar days until the week-grained streak
+  exists.
+- **Streaks reset silently and are never shown in red.** That's a feature
+  ([ADR-0007](adr/0007-no-dark-patterns.md)), but if you *want* an alarming
+  streak, Furrow will not give you one.
+
+## Awards are hardcoded
+
+- There are exactly **six** awards, and their unlock checks are hand-written in
+  `AwardService` — there is **no general award-criterion engine**. Adding an award
+  means writing code, not data. A general engine is deferred.
+
+## Editing and history
+
+- **Past editing is partial.** Long-press fixes a past *tick* (binary) inline. A
+  past *count* or *duration* edit still goes through the detail screen — inline
+  past-editing for those cadences is deferred (it needs a day-parameterised
+  sheet).
+- **Habit deletion vs. archive.** Resting a habit hides it; removing it is a
+  soft delete with an Undo and a lasting Recently removed list in Settings.
+  Only Delete forever, confirmed, hard-deletes. Removed habits are never purged
+  on a timer. Deleting a single mark or clearing a habit's history is a real
+  delete whose Undo lasts only while the detail screen is open.
+- **Backups from a newer build.** Schema v2 (soft delete) writes
+  `schemaVersion: 2`, so an older Furrow refuses a newer backup as "from a
+  newer version" rather than restoring removed habits as live.
+
+## Other deferred pieces
+
+- **Per-virtue precept editing.** There is no editor, and no code reads an
+  override yet (a comment reserves the key name `virtuePrecept_<key>`), so
+  precepts are always the Franklin defaults.
+- **No working home-screen widget.** The Android build registers a widget left
+  over from the Sundial fork. It reads a `today_hours` value that no Furrow
+  code writes, so it shows a placeholder and nothing about your habits.
+- **No reminders.** By design, there are no habit reminders or nudges
+  ([ADR-0007](adr/0007-no-dark-patterns.md)). Furrow posts no notifications at
+  all; a duration timer runs only inside the time sheet.
+
+## Platform notes
+
+- **Golden tests are environment-sensitive.** Font rasterisation differs across
+  machines, so the golden suite under `test/visual/` is **tagged and excluded from
+  CI**; regenerate locally with `flutter test --update-goldens test/visual/` when
+  you deliberately change the grid's look.
+- **Web storage is evictable.** Browser storage can be reclaimed under pressure;
+  the PWA calls `navigator.storage.persist()` to resist this, but a browser may
+  still clear an un-granted origin. The installed APK does not have this caveat.
+- **iOS / desktop are not built.** Flutter could target them; Furrow ships Android
+  + web today ([ADR-0005](adr/0005-pwa-and-apk.md)).
+
+If any of the above is a hard requirement for you, Furrow may not fit yet — and
+that's the point of listing it here.

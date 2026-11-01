@@ -1,0 +1,120 @@
+# Contributing to Furrow
+
+Thank you for taking the time to contribute! This document explains how to report issues, suggest features, and submit code changes. Before working in the code, read [AGENTS.md](AGENTS.md) and the [architecture overview](docs/architecture/OVERVIEW.md).
+
+---
+
+## Reporting Bugs
+
+Before opening a new issue, search existing issues to avoid duplicates.
+
+When filing a bug report, please include:
+- Flutter version (`flutter --version`)
+- Device/OS and version
+- Steps to reproduce
+- Expected behaviour vs. actual behaviour
+- Any relevant log output (`flutter logs`)
+
+---
+
+## Suggesting Features
+
+Open an issue with the `enhancement` label. Describe the problem you are trying to solve rather than jumping straight to a solution — this helps discussion stay focused.
+
+---
+
+## Development Setup
+
+Furrow depends on sibling repositories by path. Clone them first, as the [README quickstart](README.md#quickstart-development) shows, or `flutter pub get` cannot resolve them.
+
+```bash
+git clone git@github.com:levitatingflyfisher/Furrow.git
+cd Furrow
+flutter pub get
+```
+
+Furrow uses Drift ORM and Riverpod codegen. Generated `*.g.dart` (Riverpod) and `*.drift.dart` (Drift, see `build.yaml`) files are gitignored, so you must run code generation after every fresh checkout or dependency change:
+
+```bash
+dart run build_runner build --delete-conflicting-outputs
+```
+
+Without this step, `flutter build` will fail with "No such file or directory" errors on `*.g.dart` and `*.drift.dart` imports.
+
+### Android build notes
+
+- Java 25 is supported. Gradle wrapper is pinned in `android/gradle/wrapper/gradle-wrapper.properties`.
+- Core library desugaring is enabled in `android/app/build.gradle.kts`.
+
+---
+
+## Code Style
+
+All contributions must pass the following checks before review:
+
+```bash
+# Format
+flutter format .
+
+# Static analysis (must have zero issues)
+flutter analyze
+
+# Tests (must all pass)
+flutter test
+```
+
+The project uses `package:flutter_lints` with standard rules — no overrides. Do not disable lint rules without a well-reasoned justification in the PR description.
+
+---
+
+## Testing
+
+- Every new feature must include tests.
+- Bug fixes should include a regression test where feasible.
+- Tests live in `test/` and mirror the `lib/` structure — e.g. `test/features/habits/`, `test/shared/`, `test/core/`, and golden tests under `test/visual/`.
+- Pure domain logic (streaks, awards, progress) gets a plain unit test; the signature Today grid is pinned by golden tests.
+- Repository tests use an in-memory SQLite database (no mocking needed thanks to Drift's `NativeDatabase.memory()`).
+- Golden tests are environment-sensitive and excluded from CI; regenerate them with `flutter test --update-goldens test/visual/` when you deliberately change the UI.
+
+---
+
+## Pull Request Workflow
+
+1. Fork the repository and create a feature branch from `master`:
+   ```bash
+   git checkout -b feat/my-feature
+   ```
+2. Make your changes, following the code style rules above.
+3. Open a PR against the `master` branch with a clear description of what changed and why.
+4. Link any related issues in the PR description (`Closes #123`).
+
+PRs that fail `flutter analyze` or `flutter test` will not be merged.
+
+---
+
+## Architecture Notes
+
+Furrow uses clean architecture with a feature-based folder layout. When adding a new feature:
+
+1. Create a directory under `lib/features/<feature-name>/` with three sub-directories:
+   - `domain/` — entity classes, pure logic (no DB, no widgets), and an abstract repository interface
+   - `data/` — implement the repository using a Drift DAO
+   - `presentation/` — screens, widgets, and Riverpod controllers/providers
+
+2. Add database tables to `lib/core/storage/app_database.dart` and a DAO under the feature's `data/` directory. If you change an existing table, bump `schemaVersion` and add a migration (`onCreate` builds the current schema; `onUpgrade` holds each step since v1).
+
+3. Run `dart run build_runner build --delete-conflicting-outputs` to regenerate Drift + Riverpod code.
+
+4. Register providers (e.g. in `lib/core/providers/core_providers.dart`).
+
+5. Add routes in `lib/core/router/app_router.dart`.
+
+See the [architecture overview](docs/architecture/OVERVIEW.md) for the module map and diagrams.
+
+---
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+
+Questions? Open an issue on GitHub.

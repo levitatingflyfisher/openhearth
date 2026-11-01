@@ -1,0 +1,22 @@
+# riverpod_generator 3 and later must resolve every type in a provider's
+# signature, and several providers return drift's generated classes
+# (Habit, HabitMark, HabitBadge). Drift's default builder hands its classes
+# to source_gen's shared part, which is written only after every generator
+# has run, so riverpod_generator cannot see them. Drift's not_shared builder
+# writes its own part files (app_database.drift.dart and one per DAO)
+# first; this is drift's documented set-up for using its classes in other
+# builders.
+targets:
+  $default:
+    builders:
+      drift_dev:
+        enabled: false
+      drift_dev:analyzer:
+        enabled: true
+      drift_dev:not_shared:
+        enabled: true
+
+global_options:
+  drift_dev:not_shared:
+    runs_before:
+      - riverpod_generator

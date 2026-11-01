@@ -1,0 +1,134 @@
+import 'package:furrow/shared/extensions/datetime_ext.dart';
+
+/// Benjamin Franklin's thirteen virtues, in his own canonical order (never
+/// alphabetical), with his precepts. Used as an optional seed set and for the
+/// "virtue of the week" rotation. Precepts are runtime-overridable via the
+/// UserPrefs key `virtuePrecept_<key>` (override UI deferred; the key exists).
+class Virtue {
+  final String key;
+  final String name;
+  final String precept;
+  const Virtue(this.key, this.name, this.precept);
+}
+
+const List<Virtue> kFranklinVirtues = [
+  Virtue('temperance', 'Temperance',
+      'Eat not to dullness; drink not to elevation.'),
+  Virtue('silence', 'Silence',
+      'Speak not but what may benefit others or yourself; avoid trifling conversation.'),
+  Virtue('order', 'Order',
+      'Let all your things have their places; let each part of your business have its time.'),
+  Virtue('resolution', 'Resolution',
+      'Resolve to perform what you ought; perform without fail what you resolve.'),
+  Virtue('frugality', 'Frugality',
+      'Make no expense but to do good to others or yourself, i.e., waste nothing.'),
+  Virtue('industry', 'Industry',
+      'Lose no time; be always employed in something useful; cut off all unnecessary actions.'),
+  Virtue('sincerity', 'Sincerity',
+      'Use no hurtful deceit; think innocently and justly, and, if you speak, speak accordingly.'),
+  Virtue('justice', 'Justice',
+      'Wrong none by doing injuries or omitting the benefits that are your duty.'),
+  Virtue('moderation', 'Moderation',
+      'Avoid extremes; forbear resenting injuries so much as you think they deserve.'),
+  Virtue('cleanliness', 'Cleanliness',
+      'Tolerate no uncleanliness in body, clothes, or habitation.'),
+  Virtue('tranquillity', 'Tranquillity',
+      'Be not disturbed at trifles, or at accidents common or unavoidable.'),
+  Virtue('chastity', 'Chastity',
+      'Rarely use venery but for health or offspring, never to dullness, weakness, or the injury of your own or another’s peace or reputation.'),
+  Virtue('humility', 'Humility', 'Imitate Jesus and Socrates.'),
+];
+
+/// The virtue Franklin focused on for a given week, derived from a Monday
+/// anchor date independent of any habit rows: `virtues[weeksSinceAnchor % 13]`.
+/// Calendar days via the DST-safe [daysBetweenDates] — the naive
+/// `difference().inDays` loses the spring-forward hour and flips the week
+/// boundary a day late.
+Virtue virtueOfWeek(DateTime anchorMonday, DateTime now) {
+  final weeks = daysBetweenDates(anchorMonday, now) ~/ 7;
+  final idx = ((weeks % 13) + 13) % 13; // guard negatives
+  return kFranklinVirtues[idx];
+}
+
+/// The week's FOCUS virtue: the household's override when one is set for
+/// this week, else the rotation. An unknown override key falls back to the
+/// rotation — a renamed/removed virtue must never crash the home surface.
+Virtue focusVirtueForWeek({
+  required DateTime anchorMonday,
+  required DateTime now,
+  String? overrideKey,
+}) {
+  if (overrideKey != null) {
+    for (final v in kFranklinVirtues) {
+      if (v.key == overrideKey) return v;
+    }
+  }
+  return virtueOfWeek(anchorMonday, now);
+}
+
+/// What planting the thirteen virtues actually did, so the app can say so
+/// instead of always claiming "planted".
+class SeedResult {
+  const SeedResult({
+    this.planted = 0,
+    this.restored = 0,
+    this.resting = 0,
+    this.alreadyActive = 0,
+    this.waiting = 0,
+    this.focusName,
+  });
+
+  /// Newly planted virtues left resting until their week comes.
+  final int waiting;
+
+  /// This week's virtue, when this planting planted it (active).
+  final String? focusName;
+
+  /// New habits created for virtues that had none.
+  final int planted;
+
+  /// Removed virtues brought back (not duplicated).
+  final int restored;
+
+  /// Virtues already present but resting; left resting.
+  final int resting;
+
+  /// Virtues already present and active.
+  final int alreadyActive;
+}
+
+/// The one-line report Settings shows after planting.
+String seedMessage(SeedResult r) {
+  final parts = <String>[];
+  if (r.planted == kFranklinVirtues.length) {
+    parts.add('Planted the thirteen virtues.');
+  } else if (r.planted > 0) {
+    parts.add('Planted ${r.planted} of the thirteen virtues.');
+  }
+  if (r.planted > 0) {
+    final rest = r.planted == kFranklinVirtues.length && r.waiting == 12
+        ? 'twelve'
+        : '${r.waiting}';
+    if (r.focusName != null && r.waiting == 1) {
+      parts.add('${r.focusName} is this week’s; the other one rests until '
+          'its week comes.');
+    } else if (r.focusName != null && r.waiting > 0) {
+      parts.add('${r.focusName} is this week’s; the other $rest rest until '
+          'their week comes.');
+    } else if (r.waiting > 0) {
+      parts.add('${r.waiting} rest until their week comes.');
+    }
+  }
+  if (r.restored > 0) {
+    parts.add('Brought back ${r.restored} you had removed.');
+  }
+  if (parts.isEmpty) {
+    parts.add('All thirteen are already planted.');
+    if (r.resting > 0) {
+      parts.add(r.resting == 1
+          ? '1 is resting; find it under Resting below.'
+          : '${r.resting} are resting; find them under Resting below.');
+    }
+  }
+  return parts.join(' ');
+}
