@@ -1,0 +1,37 @@
+import 'package:oh_fleet_conformance/oh_fleet_conformance.dart';
+
+/// Hatch's recorded fleet posture — every deliberate divergence from
+/// fleet canon lives in this one config, enforced as tests.
+void main() => runFleetConformance(
+  const FleetAppConfig(
+    appId: 'hatch',
+    // Hatch bundles Lora + Nunito, so there is no web-font fallback to
+    // catch a character they cannot draw — C7 sweeps lib/ for any.
+    // C8: a bare IconButton.filled paints its glyph the same color as its
+    // own fill under ohStyle's ambient iconTheme — invisible, not just
+    // low-contrast. Filled icon buttons must come from OhIconButton.
+    checks: {
+      // C13: the PWA loads nothing from Google's CDNs. web/flutter_bootstrap.js
+      // points CanvasKit and the engine's fallback fonts at this origin.
+      FleetCheck.c13WebSelfHosted,
+      ...FleetAppConfig.withBundledFonts,
+      FleetCheck.c8IconButtons,
+    },
+    // Tier T: canonical openhearth_design tokens + text ladder; theme
+    // construction stays local (signature accent is canonical hearth500,
+    // no retyped literals).
+    styleTier: StyleTier.tokens,
+    // ZERO permissions is the point of this app: no INTERNET (ads/IAP/
+    // tracking are architecturally impossible), no notifications (the nest
+    // never nags), no vibrate (HapticFeedback needs no permission).
+    androidPermissions: {},
+    // C4 v2 — the release MERGED surface, verified against the built
+    // artifact at v0.1 (aapt2 dump badging on the arm64 split APK shows
+    // exactly this set): audioplayers, share_plus, file_picker and pdf
+    // inject no permissions; the DYNAMIC_RECEIVER self-permission is
+    // AndroidX's own and grants nothing.
+    mergedAndroidPermissions: {
+      'com.openhearth.hatch.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION',
+    },
+  ),
+);
