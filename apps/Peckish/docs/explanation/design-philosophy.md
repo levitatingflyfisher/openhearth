@@ -1,0 +1,35 @@
+# Design philosophy
+
+**The two-tap law.** A regular meal logs in one tap (the recents rail);
+anything else in two (+ opens the speed-dial, one more tap picks the route —
+Find food, Quick add, Scan, Type a code, Guess it). If a flow grows a third
+obligatory tap,
+the flow is wrong. This came from watching a sibling app (Furrow) invert its
+own loop — the grid that should have been *output* became the input surface.
+
+**Nutrition describes meals.** The week's dinners are a household fact. The
+app states facts in a calm voice and never editorializes: no streaks, no
+red, no push. See ADR-0003.
+
+**Unknown is never zero.** A custom food with no protein entered reports
+protein as unknown; a day of kcal-only entries has unknown protein, not 0 g.
+Faking zeros would quietly poison every total downstream.
+
+**The ledger never rewrites.** Diary entries snapshot their macros at log
+time. Editing a food or deleting a recipe changes the future, never the
+past.
+
+**The grocery list is a projection with three laws.** Manual adds always
+survive regeneration; checked items survive and suppress duplicates;
+unchecked generated lines follow the plan wholesale. The aisle classifier is
+deliberately dumb — a roughly-sorted list beats an unsorted one, and the
+user out-ranks the classifier by simply not caring.
+
+**The network is a question, never a reflex.** Nothing looks anything up
+by itself: a pasted URL fetches, a tapped Download downloads, a scanned
+barcode that misses the phone's own databases shows a button that names
+where the digits would go. The privacy screen (Settings → What leaves your
+device) is the contract; ADR-0010 is the fullest expression.
+
+**CRUD completeness is table stakes.** Everything visible can be edited,
+deleted, archived, or reset. Forgiveness over prevention applies to data.

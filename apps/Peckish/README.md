@@ -1,0 +1,92 @@
+# Peckish
+
+**Feed the week.** The family food app: a recipe box, a weekly dinner plan,
+the grocery list that writes itself from the plan, and a quiet one-tap food
+diary for anyone in the house who wants their own numbers.
+
+Local-first and offline by design: the food database — 13,652 USDA foods with
+household portions — is **bundled with the app**, so search, logging,
+planning, and the grocery list all work with zero network. No accounts, no
+ads, no tracking, no subscriptions.
+
+## What it does
+
+- **Recipe box** — paste a link and the page becomes a recipe
+  (schema.org/JSON-LD extraction, preview-then-confirm), or write one down.
+  Per-serving nutrition appears when the site published it; otherwise the
+  recipe simply has no numbers, which is fine.
+- **The week** — plan dinners onto seven plates; "Leftovers" and "Out" are
+  first-class plans. A renamed recipe renames on the calendar.
+- **Groceries** — "Set the table" turns the visible week into an
+  aisle-sorted list. Manual adds always survive regeneration; checked items
+  are never re-added; unchecked generated lines follow the plan.
+- **Today** — a one-tap diary built around your regulars: recents rail,
+  saved meals, offline search over the bundled spine, quick add. Optional
+  targets with roles (a floor, a budget, a land-near), and "round out your
+  day" suggestions drawn from your own regulars.
+- **The month behind you** — its own tab: a trend line for the macro you
+  pick with your target ruled across it, and a calendar whose every past
+  day opens that day's plate, complete with its own kcal and per-macro
+  breakdown. Nothing disappears, blank days stay honestly blank, and
+  every way of logging — your regulars, search, quick add, barcode, AI —
+  works on a day you already lived, one tap where it should be one tap.
+- **Scan it** — barcode scan (camera or typed digits), answered from your
+  own saved foods first, then downloadable offline databases on your
+  phone; a code nobody knows shows one button, "Ask openfoodfacts.org",
+  and only that tap sends the digits. Save a scanned food and the next
+  scan of that tin just logs it.
+- **Guess it** — describe the meal, or snap the plate (Android), and AI
+  drafts lines you prune and confirm. Pick where it thinks: a model
+  downloaded to the phone, your household's own desktop over an
+  encrypted LAN channel, a server you run yourself (any
+  OpenAI-compatible endpoint), or your own cloud key. Ships off; every
+  AI-drafted line carries its provenance.
+- **The household kitchen** — recipes, the plan, groceries, custom foods
+  and saved meals can sync over an encrypted pairing on your own Wi-Fi;
+  diaries and targets never leave their device.
+- **Your data is yours** — encrypted `.ohbk` backup/restore (sanctuary),
+  plain-JSON export, and a real erase button.
+
+## The network, exactly
+
+The app touches the network only when you act: fetching the one recipe URL
+you pasted, optional downloads (an on-device AI model, the offline barcode
+databases), and — when a scanned barcode isn't in your phone's databases —
+an Open Food Facts lookup that runs only when you tap "Ask
+openfoodfacts.org". With the offline database installed, a scan is answered
+on the phone and nothing leaves. Two things you switch on yourself also
+use the network: an AI guess sends the words you typed to the one service
+you set up (your home stove, your own server, or your own cloud key; the
+on-phone model sends nothing), and household sync moves encrypted bundles
+between your own devices on your own Wi-Fi. Everything else is on-device,
+forever. The
+full map lives in-app: Settings → What leaves your device.
+
+## Building
+
+```sh
+flutter pub get
+dart run build_runner build --delete-conflicting-outputs
+flutter test
+flutter build web --release   # or: flutter build apk --release
+```
+
+The two web builds (the app's own address and the move page) are in
+[docs/how-to/web-builds.md](docs/how-to/web-builds.md).
+
+Sibling path dependencies (`../packages/sanctuary_auth_core`,
+`../packages/sanctuary_backup_ui`, `../packages/oh_fleet_conformance`,
+`../ohStyle/openhearth_design`, `../DomovoiDiscernment`) follow the OpenHearth monorepo layout — see
+`.github/workflows/ci.yml` for the clone-siblings recipe.
+
+## Data
+
+Generic-food nutrition: [USDA FoodData Central](https://fdc.nal.usda.gov/)
+(public domain, CC0) — Foundation Foods + SR Legacy + FNDDS survey foods,
+distilled to a 2.4MB bundled asset. Regeneration recipe in `tool/usda/`.
+
+Peckish is not medical or dietary advice.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

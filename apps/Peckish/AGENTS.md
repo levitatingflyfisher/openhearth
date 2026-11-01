@@ -1,0 +1,132 @@
+# AGENTS.md — working on Peckish
+
+This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it.
+
+Peckish is the OpenHearth family food app: recipe box + weekly plan +
+self-writing grocery list + one-tap diary, local-first, no accounts.
+Android applicationId/namespace: **com.openhearth.peckish** (from commit 1 —
+never `com.example`).
+
+## Read first
+
+README → VISION (the one idea + honest scorecard) → this file →
+docs/README.md (Diátaxis hub). Decisions live in docs/adr/.
+
+## Map
+
+- `lib/core/` — providers (all repositories + `spineReady`: a compile-time
+  spine-version const answers first, the 2.5MB asset loads only on a
+  genuine import), router (5-tab shell: Today/Plan/Recipes/Groceries/
+  History), drift `AppDatabase`.
+- `lib/features/food/` — `MacroSet` (null = unknown, never zero), the
+  bundled-USDA repository (import/search/portions), custom foods.
+- `lib/features/diary/` — the ledger (snapshot macros at log time), saved
+  meals (one-tap `logMeal`), targets with roles + the suggestion engine,
+  Today + add sheet + history (month trend line, tappable calendar, day
+  pages, edit sheet). `domain/day_stamp.dart` holds the ONE rule for which
+  day a log lands on and `domain/relog.dart` the ONE rule for logging a
+  known food again — every add path calls them; don't re-derive either.
+  (Both were private to the + sheet once, which is exactly why the barcode
+  path could only ever write "now".) `presentation/regulars_rail.dart` and
+  `presentation/totals_card.dart` are shared by Today and any past day —
+  a past day is not a second-class day.
+- `lib/features/barcode/` — GTIN validation + scanner tuning, the
+  downloadable slice DBs (spec / download service / local db) and the
+  resolver chain (your own saved foods → usda → off_us → explicit ask),
+  the OFF client. ADR-0010.
+- `lib/features/ai/` — the guesstimate (BYOK, a self-hosted
+  OpenAI-compatible server, on-device model, or the
+  household stove — domovoi's encrypted home-server tier, `stove/` trio),
+  the plate labeler, the model manager (ADR-0009). The parser only drafts;
+  logging is always the user's confirm.
+- `lib/features/sync/` — LAN pairing, HLC `sync_clock`, the LWW engine +
+  codec (ADR-0006); kitchen tables only, encryption fail-closed.
+- `lib/features/recipes/` — box CRUD, schema.org parser, fetcher, UI.
+- `lib/features/plan/` — week cells (recipe/meal/note; titles resolve live).
+- `lib/features/groceries/` — the list + its three regeneration laws +
+  keyword aisle classifier.
+- `lib/features/sanctuary_backup/` + `lib/features/settings/` — .ohbk wiring
+  (PeckishExport is the single wire shape), export/erase, the privacy map.
+- `lib/shared/` — ONE transfer path: domovoi's `resumableDownload` engine
+  behind the `data/download_stream` façade, and ONE download-card state
+  machine (`widgets/download_card`) — model and barcode downloads both ride
+  them; `num_field` + `qty_format` are the only number entry/formatting.
+  Don't fork copies.
+- `assets/food/usda_foods.json` — the bundled spine (regenerate via
+  `tool/usda/`, see its README for the FNDDS nutrient-id gotcha); the
+  barcode slices are NOT assets — built by `tool/barcode_db/`, published
+  as release assets, downloaded in-app.
+
+## Non-negotiables
+
+- **The growth law:** any new user-data table joins, in the SAME commit:
+  `AppDatabase.eraseUserData`, `PeckishExport` (sections), the backup
+  serializer, and the restore-consequence copy — which is TEST-BOUND
+  (backup_serializer_test) to name everything erase wipes.
+- **Null is unknown, never zero.** Day totals fold from the all-null set;
+  a kcal-only day reports protein as unknown. Don't "fix" this.
+- **Ledger snapshots.** Diary entries carry their own macros; editing or
+  deleting a food/recipe/meal never rewrites history.
+- **Two-tap law + thumb targets.** Regulars log in one tap — on EVERY day,
+  not just today; every top-level screen must pass the 320dp / 2× textScale
+  sweep (test/shared/accessibility_sweep_test.dart). Beware widgets that
+  shear rather than overflow: a `Chip` fixes its height and forces one
+  line, so a too-long label is silently cut instead of failing the sweep.
+- **A modal holding typed input refuses the barrier.** `showInputSheet` /
+  `showInputDialog` in `shared/widgets/input_modal.dart` — never raw
+  `showModalBottomSheet`/`showDialog` for a form. Sheets carry a
+  `SheetCloseButton`; dialogs already have Cancel. Tapping away is still
+  right for a modal with nothing typed in it (a confirm, a portion
+  picker) — the rule is scoped to work that can be lost, not to modals in
+  general.
+- **A full screen holding typed work keeps a draft.** The recipe editor
+  writes what is typed to `RecipeDraftStore` (shared preferences, keyed
+  `new` / `edit:<id>` / `import:<url>`) as it is typed, so back, a tab
+  switch or the app being killed loses nothing; Save and Start over clear
+  it, and Erase all data and a restore take every draft. Drafts are not in
+  backups.
+- **Erase and restore reset through one function.** `_forgetCachedData` in
+  `settings_actions.dart` reloads every provider in `storedDataCaches` and
+  ends the app-wide Undo. A new provider that lives as long as the app
+  fails `stored_data_caches_guard_test.dart` until it is added to that list
+  or ruled to hold no stored data.
+- **Only print glyphs the bundled fonts have.** Peckish draws in Lora +
+  Nunito, bundled as openhearth_design's package fonts (the app keeps no
+  copy of its own), precisely so it depends on nobody's network — so ≥, ≤, ≈, →
+  and friends render as boxes. test/shared/theme/font_coverage_test.dart
+  walks every string literal in `lib/` against both cmaps; it is the
+  reason target roles read "min"/"max".
+- **Network only when the user acts** — the privacy screen (Settings →
+  What leaves your device) is the contract, mirrored in
+  docs/reference/permissions.md. Barcode scans resolve against the local
+  database slices first; the OFF lookup runs only from the explicit "Ask
+  openfoodfacts.org" tap (ADR-0010). The conformance test records the
+  permission surface.
+- **Storage enums** (`FoodKindDb` etc.) are separate from domain enums so a
+  reorder can't rewrite stored integers. Append only.
+- Wire schemaVersion (PeckishExport, hardcoded 1) ≠ drift schemaVersion.
+  Additive JSON keys never bump the wire version.
+
+## Riverpod 3
+
+- Every new FutureProvider or StreamProvider that reads storage carries
+  `retry: noAutoRetry` (`lib/core/providers/retry_policy.dart`); main()
+  builds its root with `peckishProviderScope`, which covers the shared
+  packages. test/core/no_auto_retry_test.dart is the pattern: fail the
+  repository with an Exception (riverpod 3 retries only an Exception).
+- A screen reads its data with `shownValue`
+  (`lib/core/providers/shown_value.dart`), never a bare `value`: on
+  riverpod 3 `value` is null on a failure, and `value ?? empty` would draw
+  a failed read as an empty list. A bare `value` is right only where a
+  failure means "nothing to show" (the speed dial's AI tile).
+- A hidden widget's `ref.watch` pauses. Work that must go on while its
+  screen is covered belongs above the navigator (as the theme does in
+  PeckishApp) or in a container subscription, never in a covered widget.
+
+## How to work
+
+TDD (tests exist for every layer — copy their patterns), atomic commits
+stating the why, `dart run build_runner build --delete-conflicting-outputs`
+after schema/provider changes, `flutter analyze` clean, full `flutter test`
+before pushing. CI clones the sibling packages by path — see
+.github/workflows/ci.yml.
