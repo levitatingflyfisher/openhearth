@@ -1,0 +1,22 @@
+# Porch relay TLS terminator — part of the audited surface (BUILD-SPEC §4).
+#
+# log off, structurally:
+#   - Caddy writes no access logs unless a site enables them; we go further
+#     and explicitly wire the access-log output to discard, so an audit sees
+#     the intent, not an implicit default.
+#   - The process/error stream on stderr carries operational errors only
+#     (cert renewals, bind failures) — never request data.
+
+{
+	admin off
+}
+
+{$PORCH_DOMAIN:localhost} {
+	# Access logging: off. Output is discarded at the sink; nothing about
+	# requests (IPs, paths, capabilities-in-URLs) is ever written anywhere.
+	log {
+		output discard
+	}
+
+	reverse_proxy relayd:8080
+}

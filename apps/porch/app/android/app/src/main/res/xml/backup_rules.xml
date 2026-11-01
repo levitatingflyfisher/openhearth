@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and older read fullBackupContent instead of
+     dataExtractionRules. Same rules: the secrets file and Porch's own
+     backup files stay out. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    <exclude domain="file" path="backups" />
+</full-backup-content>

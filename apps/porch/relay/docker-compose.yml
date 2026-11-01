@@ -1,0 +1,60 @@
+# Porch relay stack (BUILD-SPEC Gate 1): redis (AOF everysec) + relayd + caddy.
+# Reproduces prod locally; ops/DEPLOY.md (W5) walks the Hetzner install.
+#
+# Zero-logging is enforced at every layer:
+#   - relayd contains no logging calls (CI-greped) and discards net/http's logger
+#   - caddy access logs are discarded (ops/Caddyfile)
+#   - redis logs nothing about content (opaque ciphertext values only)
+services:
+  redis:
+    # Pinned by digest: the linux/amd64 image the relay's Redis tests ran on.
+    image: docker.io/library/redis@sha256:a6dd428750118c2c2c67d3f555faef0aa15a2b71198b40e1cb3b9229b1cf3094 # redis:7 (7.4.12, linux/amd64)
+    # maxmemory: Redis never grows past 512 MB. At the ceiling it refuses
+    # writes by design (noeviction), and relayd answers 507 until keys
+    # expire. It never drops a key to make room: an evicting policy would
+    # drop the drain replay entries first (the shortest-lived keys) and
+    # make a captured drain replayable. The caps bound counts, not bytes:
+    # the worst case is far over 512 MB, so a full Redis is expected.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    # No ports: reachable only from relayd on the compose network.
+
+  relayd:
+    build: ./relay
+    # -trust-forwarded is safe here ONLY because of this topology: relayd
+    # publishes no ports, so its sole ingress is caddy on the compose network.
+    # Caddy terminates TLS and appends the real client IP as the LAST
+    # X-Forwarded-For hop; relayd keys rate limits on that last hop, so
+    # client-forged XFF prefixes cannot mint fresh buckets. Never pass this
+    # flag to a relayd that is directly reachable.
+    command: ["-addr", ":8080", "-store", "redis", "-redis-url", "redis://redis:6379", "-trust-forwarded"]
+    depends_on:
+      - redis
+    restart: unless-stopped
+    read_only: true
+    # No ports: TLS terminates at caddy; relayd is never exposed raw.
+
+  caddy:
+    # Pinned by digest: the linux/amd64 image of the 2-alpine tag, read
+    # from its manifest list on 15 Nov 2026.
+    image: docker.io/library/caddy@sha256:fc9cbc100585871d18d4e451cca7021785c90a7006087427ae5ceb3e4efe6424 # caddy:2-alpine (2.11.9-alpine, linux/amd64)
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Set PORCH_DOMAIN for real TLS; defaults to localhost self-signed.
+      - PORCH_DOMAIN=${PORCH_DOMAIN:-localhost}
+    volumes:
+      - ./ops/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - relayd
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  caddy-data:
+  caddy-config:

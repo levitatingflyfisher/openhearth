@@ -1,0 +1,43 @@
+# Porch relay — systemd unit (BUILD-SPEC §2 ops/; the bare-metal
+# alternative to docker-compose.yml). Pairs with Caddy for TLS and a local
+# Redis with AOF everysec; ops/DEPLOY.md walks the full install.
+#
+# Zero-logging note: relayd writes NOTHING after startup (structurally —
+# CI-greped). StandardOutput/StandardError=null makes the unit's journal
+# footprint match the binary's: empty. The only loss is the one permitted
+# startup error line; if the service flaps, temporarily set
+# StandardError=journal to read it, then set it back.
+[Unit]
+Description=Porch blind relay (relayd)
+After=network-online.target redis.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/relayd -addr 127.0.0.1:8080 -store redis -redis-url redis://127.0.0.1:6379 -trust-forwarded
+Restart=on-failure
+RestartSec=2
+
+# Least privilege: relayd needs a socket and Redis, nothing else.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+# No request data can reach the journal: the binary is silent by
+# construction AND the streams are discarded by configuration.
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

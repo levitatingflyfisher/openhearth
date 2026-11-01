@@ -1,0 +1,32 @@
+name: porch_app
+description: "Porch \u2014 the porch light for your friend group. Presence, not chat."
+publish_to: none
+version: 1.0.0+1
+environment:
+  sdk: ^3.10.7
+dependencies:
+  flutter:
+    sdk: flutter
+  sodium: 3.4.6
+  sodium_libs: 3.4.6+4
+  crypto: 3.0.8
+  meta: ^1.17.0
+  flutter_secure_storage: 9.2.4
+  http: ^1.2.0
+  web: ^1.1.0
+  flutter_riverpod: 3.1.0
+  path_provider: 2.1.6
+  share_plus: 12.0.2
+  openhearth_design:
+    path: ../../../packages/ohStyle/openhearth_design
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  test: any
+  share_plus_platform_interface: 6.1.0
+  oh_fleet_conformance:
+    path: ../../../packages/oh_fleet_conformance
+  flutter_lints: ^6.0.0
+flutter:
+  uses-material-design: true
+resolution: workspace

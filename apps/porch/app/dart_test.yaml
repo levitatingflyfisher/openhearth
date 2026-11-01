@@ -1,0 +1,7 @@
+# Test tags. `golden` marks pixel golden tests, which are environment-specific
+# (font rasterisation differs across machines) and are kept for local visual
+# review. CI runs them with --update-goldens, so their overflow checks still
+# run there while the pixels are compared only on a dev machine.
+tags:
+  golden:
+    description: Pixel golden tests; pixels compared locally, overflow checked in CI.
