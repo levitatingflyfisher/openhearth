@@ -1,0 +1,54 @@
+import 'package:oh_fleet_conformance/oh_fleet_conformance.dart';
+
+void main() => runFleetConformance(const FleetAppConfig(
+      appId: 'weatherglass',
+      // Bundles its own type, so nothing falls back to a web font — a
+      // character the bundled families cannot draw is a box on a
+      // real phone. C7 sweeps lib/ for any.
+      // C8: a bare IconButton.filled/.filledTonal collides with ohStyle's
+      // ambient iconTheme — glyph and fill paint the same color. Use
+      // OhIconButton, which pins the right one.
+      checks: {
+        ...FleetAppConfig.withBundledFonts,
+        FleetCheck.c8IconButtons,
+        // C10: no raw exception text on screen — errors go through
+        // OhErrorState / ohFriendlyErrorMessage (openhearth_design 0.7).
+        FleetCheck.c10RawErrors,
+        // C11: a top-bar action carries a name, not only a glyph. Glass's
+        // bars use icon + word (TextButton.icon, OhThemeToggle).
+        FleetCheck.c11IconLabels,
+        // C9: every GoRoute has a way in. C12: the sky-blue accent stays
+        // distinguishable from ohStyle's error red. C5-primaryScreens: the
+        // screens below are swept at 360 dp x 1.3 in
+        // test/a11y/primary_action_sweep_test.dart.
+        FleetCheck.c9Routes,
+        FleetCheck.c12AccentVsError,
+        FleetCheck.c5PrimaryScreens,
+        // C13: the PWA loads nothing from Google's CDNs. web/flutter_bootstrap.js
+        // points CanvasKit and the engine's fallback fonts at this origin; the
+        // privacy model's "no third-party asset fetched at runtime" rests on it.
+        FleetCheck.c13WebSelfHosted,
+      },
+      primaryActionScreens: {
+        'HomeScreen',
+        'LocationsScreen',
+        'AddLocationSheet',
+      },
+      styleTier: StyleTier.tokens,
+      // The coordinate-rounding privacy app needs exactly these two:
+      // INTERNET for the keyless Open-Meteo fetch, COARSE location so the
+      // OS itself can never hand the app a precise fix. Anything more (or
+      // FINE) fails here before it can ship.
+      androidPermissions: {
+        'android.permission.INTERNET',
+        'android.permission.ACCESS_COARSE_LOCATION',
+      },
+      // C4 v2 — the release MERGED surface: source permissions plus
+      // what plugins and the manifest merge inject. Bites when an APK
+      // build has left a merged manifest under build/ (dev box).
+      mergedAndroidPermissions: {
+        'android.permission.ACCESS_COARSE_LOCATION',
+        'android.permission.INTERNET',
+        'com.openhearth.glass.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION',
+      },
+    ));

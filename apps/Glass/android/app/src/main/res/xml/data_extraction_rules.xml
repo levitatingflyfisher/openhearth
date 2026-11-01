@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android's own backup is the phone owner's choice (owner's ruling, 3 July
+  2026). Saved places, settings and the forecast cache may go with it.
+  The one thing kept out is the key store: flutter_secure_storage writes the
+  recovery words, encrypted under an Android keystore key, into this shared
+  preferences file. The keystore key never comes back on a new phone, so the
+  copy would be dead weight, and the recovery words are not meant to travel.
+  The encrypted .ohbk export is the private backup.
+  Pinned by test/android/backup_config_test.dart.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    </device-transfer>
+</data-extraction-rules>

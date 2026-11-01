@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 and older (fullBackupContent). Same rule as
+  data_extraction_rules.xml: the phone owner's backup may carry the places and
+  settings, but not the recovery-word store, which is ciphertext under a
+  keystore key that does not travel.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+</full-backup-content>
