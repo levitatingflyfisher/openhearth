@@ -1,0 +1,365 @@
+import 'package:flutter/material.dart';
+import 'package:openhearth_design/openhearth_design.dart'
+    show OhColorRoles, OhColors;
+
+/// Design tokens for the One Second A Day app
+/// Supports Retro (CRT aesthetic), Modern (Material 3), and Hearth (OpenHearth warm) visual styles
+class AppTheme {
+  /// Hearth's Lora and Nunito are openhearth_design's package fonts (0.7.1+);
+  /// the Retro/Modern faces are this app's own assets.
+  static const _ohFonts = 'openhearth_design';
+
+  /// Active visual style: 'retro' | 'modern' | 'hearth'
+  static String visualStyle = 'hearth';
+
+  static bool get isRetro  => visualStyle == 'retro';
+  static bool get isModern => visualStyle == 'modern';
+  static bool get isHearth => visualStyle == 'hearth';
+
+  // Hearth palette — canonical tokens from openhearth_design (each value
+  // verified byte-identical to the literal it replaced; zero visual change).
+  static const hearthPrimary         = OhColors.hearth500;
+  static const hearthPrimaryHover    = OhColors.hearth400;
+  static const hearthBgLight         = OhColors.linen50;
+  static const hearthSurfaceLight    = OhColors.linen100;
+  static const hearthSurfaceVarLight = OhColors.linen200;
+  static const hearthTextLight       = OhColors.linen900;
+  static const hearthBgDark          = OhColors.darkSurfaceBase;
+  // PT-local dark surfaces: NOT canonical tokens. The nearest tokens are
+  // OhColors.darkSurfaceCard and darkSurfaceElevated — close, but not
+  // equal, so the literals stay to keep rendered output unchanged
+  // (tier-T law). Their hex is deliberately not restated here: the C1
+  // retyped-token scan reads comments too.
+  static const hearthSurfaceDark     = Color(0xFF2A1810);
+  static const hearthSurfaceVarDark  = Color(0xFF3A2418);
+  static const hearthTextDark        = OhColors.linen50;
+
+  // Accent color presets
+  static const Map<String, Color> accentPresets = {
+    'CRT Green': Color(0xFF00FF00),
+    'Amber': Color(0xFFFFB000),
+    'Hot Pink': Color(0xFFFF1493),
+    'Electric Blue': Color(0xFF00BFFF),
+    'Tangerine': Color(0xFFFF6600),
+    'Lavender': Color(0xFFB388FF),
+    'Mint': Color(0xFF00FFAA),
+    // Was 0xFFFF6B6B: CIEDE2000 10.2 from the dark urgency red, under C12's
+    // floor of 12. StorageService carries a stored old Coral to this one.
+    'Coral': Color(0xFFFF8C69),
+  };
+
+  // Dark theme colors (CRT aesthetic)
+  static const darkBackground = Color(0xFF0A0A0A);
+  static const darkSurface = Color(0xFF141414);
+  static const darkSurfaceVariant = Color(0xFF1E1E1E);
+
+  // Modern dark theme colors (slightly lighter surfaces)
+  static const modernDarkSurface = Color(0xFF181818);
+  static const modernDarkSurfaceVariant = Color(0xFF242424);
+
+  // Light theme colors (Paper aesthetic)
+  static const lightBackground = Color(0xFFF5F5F0);
+  static const lightSurface = Color(0xFFFFFFFF);
+  static const lightSurfaceVariant = Color(0xFFE8E8E0);
+
+  /// The fleet colour roles for [brightness] (openhearth_design 0.7.0).
+  ///
+  /// Every style attaches them, so the shared widgets (OhErrorState,
+  /// showOhConfirm, OhUndoBar) and PT's own error colour are one red: the
+  /// urgency role, never a warmth or accent colour. Dark styles use the
+  /// hearthDark set, whose urgency is legible on near-black grounds.
+  static OhColorRoles colorRoles(Brightness brightness) =>
+      brightness == Brightness.dark
+          ? OhColorRoles.hearthDark
+          : OhColorRoles.light;
+
+  /// Build theme data based on brightness, accent, and visual style.
+  /// NOTE: [accent] is ignored in Hearth mode — the palette always uses
+  /// [hearthPrimary]. The stored accent value is preserved in prefs so it
+  /// restores when the user switches back to Retro or Modern.
+  static ThemeData buildTheme(Brightness brightness, Color accent) {
+    assert(isRetro || isModern || isHearth,
+        'Unknown visualStyle: "$visualStyle". Valid values: retro, modern, hearth.');
+    if (isHearth) return _buildHearthTheme(brightness);
+
+    final isDark = brightness == Brightness.dark;
+    final roles = colorRoles(brightness);
+
+    final surface =
+        isDark ? (isModern ? modernDarkSurface : darkSurface) : lightSurface;
+    final surfaceVariant = isDark
+        ? (isModern ? modernDarkSurfaceVariant : darkSurfaceVariant)
+        : lightSurfaceVariant;
+
+    final cardRadius = isModern ? 12.0 : 4.0;
+    final buttonRadius = isModern ? 10.0 : 4.0;
+    final borderWidth = isModern ? 1.0 : 2.0;
+
+    return ThemeData(
+      useMaterial3: true,
+      brightness: brightness,
+      extensions: [roles],
+      colorScheme: ColorScheme(
+        brightness: brightness,
+        primary: accent,
+        onPrimary: _contrastColor(accent),
+        secondary: accent.withValues(alpha: 0.7),
+        onSecondary: _contrastColor(accent),
+        error: roles.urgency,
+        onError: roles.onUrgency,
+        surface: surface,
+        onSurface: isDark ? Colors.white : Colors.black87,
+        surfaceContainerHighest: surfaceVariant,
+      ),
+      scaffoldBackgroundColor: isDark ? darkBackground : lightBackground,
+      appBarTheme: AppBarTheme(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        centerTitle: true,
+        titleTextStyle: displayFont(
+          fontSize: 18,
+          color: isDark ? Colors.white : Colors.black87,
+        ),
+        iconTheme: IconThemeData(
+          color: isDark ? Colors.white : Colors.black87,
+        ),
+      ),
+      cardTheme: CardThemeData(
+        color: surface,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(cardRadius),
+          side: BorderSide(
+            color: accent.withValues(alpha: isModern ? 0.15 : 0.3),
+            width: borderWidth,
+          ),
+        ),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: accent,
+          foregroundColor: _contrastColor(accent),
+          elevation: 0,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(buttonRadius),
+          ),
+          textStyle: monoFont(fontSize: 14, fontWeight: FontWeight.bold),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: accent,
+          side: BorderSide(color: accent, width: borderWidth),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(buttonRadius),
+          ),
+          textStyle: monoFont(fontSize: 14, fontWeight: FontWeight.bold),
+        ),
+      ),
+      iconTheme: IconThemeData(color: accent),
+      dividerTheme: DividerThemeData(
+        color: isModern
+            ? (isDark ? Colors.white12 : Colors.black12)
+            : accent.withValues(alpha: 0.2),
+        thickness: 1,
+      ),
+    );
+  }
+
+  /// VT323 (Retro) / system (Modern) / Lora (Hearth) — main display font
+  static TextStyle displayFont({
+    double fontSize = 16,
+    Color? color,
+    FontWeight fontWeight = FontWeight.normal,
+    double? letterSpacing,
+  }) {
+    if (isHearth) {
+      return TextStyle(
+        fontFamily: 'Lora',
+        package: _ohFonts,
+        fontSize: fontSize,
+        color: color,
+        fontWeight: fontWeight,
+        letterSpacing: letterSpacing ?? 0,
+      );
+    }
+    if (isModern) {
+      return TextStyle(
+        fontSize: fontSize,
+        color: color,
+        fontWeight: fontWeight,
+        letterSpacing: letterSpacing ?? 0.5,
+      );
+    }
+    return TextStyle(
+      fontFamily: 'VT323',
+      fontSize: fontSize,
+      color: color,
+      fontWeight: fontWeight,
+      letterSpacing: letterSpacing ?? 1.0,
+    );
+  }
+
+  /// Press Start 2P (Retro) / Roboto Mono Bold (Modern) / Nunito Bold (Hearth)
+  static TextStyle pixelFont({
+    double fontSize = 12,
+    Color? color,
+    FontWeight fontWeight = FontWeight.normal,
+  }) {
+    if (isHearth) {
+      return TextStyle(
+        fontFamily: 'Nunito',
+        package: _ohFonts,
+        fontSize: fontSize,
+        color: color,
+        fontWeight: FontWeight.w700,
+        height: 1.3,
+      );
+    }
+    if (isModern) {
+      return TextStyle(
+        fontFamily: 'Roboto Mono',
+        fontSize: fontSize,
+        color: color,
+        fontWeight: FontWeight.bold,
+        height: 1.3,
+      );
+    }
+    return TextStyle(
+      fontFamily: 'Press Start 2P',
+      fontSize: fontSize,
+      color: color,
+      fontWeight: fontWeight,
+      height: 1.5,
+    );
+  }
+
+  /// Roboto Mono (Retro/Modern) / Nunito (Hearth) — for data and labels
+  static TextStyle monoFont({
+    double fontSize = 14,
+    Color? color,
+    FontWeight fontWeight = FontWeight.normal,
+  }) {
+    if (isHearth) {
+      return TextStyle(
+        fontFamily: 'Nunito',
+        package: _ohFonts,
+        fontSize: fontSize,
+        color: color,
+        fontWeight: fontWeight,
+      );
+    }
+    return TextStyle(
+      fontFamily: 'Roboto Mono',
+      fontSize: fontSize,
+      color: color,
+      fontWeight: fontWeight,
+    );
+  }
+
+  /// Lora (Hearth) / displayFont (Retro/Modern) — large display headings
+  static TextStyle headingFont({
+    double fontSize = 24,
+    Color? color,
+    FontWeight fontWeight = FontWeight.w600,
+  }) {
+    if (isHearth) {
+      return TextStyle(
+        fontFamily: 'Lora',
+        package: _ohFonts,
+        fontSize: fontSize,
+        color: color,
+        fontWeight: fontWeight,
+      );
+    }
+    return displayFont(fontSize: fontSize, color: color, fontWeight: fontWeight);
+  }
+
+  static ThemeData _buildHearthTheme(Brightness brightness) {
+    final isDark = brightness == Brightness.dark;
+    final roles = colorRoles(brightness);
+
+    final surface    = isDark ? hearthSurfaceDark    : hearthSurfaceLight;
+    final surfaceVar = isDark ? hearthSurfaceVarDark  : hearthSurfaceVarLight;
+    final onSurface  = isDark ? hearthTextDark        : hearthTextLight;
+
+    return ThemeData(
+      useMaterial3: true,
+      brightness: brightness,
+      extensions: [roles],
+      colorScheme: ColorScheme(
+        brightness: brightness,
+        primary: hearthPrimary,
+        onPrimary: Colors.white,
+        secondary: hearthPrimaryHover,
+        onSecondary: Colors.white,
+        error: roles.urgency,
+        onError: roles.onUrgency,
+        surface: surface,
+        onSurface: onSurface,
+        surfaceContainerHighest: surfaceVar,
+      ),
+      scaffoldBackgroundColor: isDark ? hearthBgDark : hearthBgLight,
+      appBarTheme: AppBarTheme(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        centerTitle: true,
+        titleTextStyle: displayFont(fontSize: 18, color: onSurface),
+        iconTheme: IconThemeData(color: onSurface),
+      ),
+      cardTheme: CardThemeData(
+        color: surface,
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(
+            color: isDark
+                ? Colors.white.withValues(alpha: 0.12)
+                : hearthSurfaceVarLight,
+            width: 1,
+          ),
+        ),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: hearthPrimary,
+          foregroundColor: Colors.white,
+          elevation: 0,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          shape: const StadiumBorder(),
+          textStyle: monoFont(fontSize: 14, fontWeight: FontWeight.bold),
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: hearthPrimary,
+          side: const BorderSide(color: hearthPrimary, width: 1),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          shape: const StadiumBorder(),
+          textStyle: monoFont(fontSize: 14, fontWeight: FontWeight.bold),
+        ),
+      ),
+      iconTheme: const IconThemeData(color: hearthPrimary),
+      dividerTheme: DividerThemeData(
+        color: isDark ? Colors.white.withValues(alpha: 0.12) : hearthSurfaceVarLight,
+        thickness: 1,
+      ),
+    );
+  }
+
+  /// Calculate contrast color for text on colored background
+  /// The one quiet-text colour: secondary lines, captions, section labels,
+  /// hints and quiet icons. 4.5:1 or better on surface, container and
+  /// scaffold in every style and brightness (`test/theme/dim_text_test.dart`).
+  /// Faint marks that are disabled or purely decorative stay fainter and say
+  /// so with a `// contrast-exempt:` comment.
+  static Color dimInk(ThemeData theme) =>
+      theme.colorScheme.onSurface.withValues(alpha: 0.72);
+
+  static Color _contrastColor(Color color) {
+    final luminance = color.computeLuminance();
+    return luminance > 0.5 ? Colors.black : Colors.white;
+  }
+}
