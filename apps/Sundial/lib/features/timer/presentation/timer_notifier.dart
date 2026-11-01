@@ -1,0 +1,554 @@
+// lib/features/timer/presentation/timer_notifier.dart
+import 'package:fpdart/fpdart.dart';
+import 'package:sundial/shared/extensions/duration_ext.dart';
+import 'package:sundial/core/error/failures.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart';
+import 'package:home_widget/home_widget.dart';
+import 'package:intl/intl.dart';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+import 'package:uuid/uuid.dart';
+import 'package:sundial/core/providers/core_providers.dart';
+import 'package:sundial/core/storage/app_database.dart';
+import 'package:sundial/features/sessions/domain/session_invariants.dart';
+import 'package:sundial/features/timer/data/timer_notification_service.dart';
+import 'package:sundial/features/timer/domain/timer_state.dart';
+
+part 'timer_notifier.g.dart';
+
+// keepAlive: the timer belongs to the app, not to whichever screen shows it.
+// Auto-dispose dropped an unsaved draft (held only in memory) the moment the
+// Timer tab was left.
+@Riverpod(keepAlive: true)
+class TimerNotifier extends _$TimerNotifier {
+  Timer? _ticker;
+  int _tickCount = 0;
+
+  /// In-flight (or last completed) stopAndSave. Two independent stop paths
+  /// exist — the native MethodChannel push and the 1s SharedPreferences-flag
+  /// ticker — and both can fire for the same tap. The latch makes the second
+  /// caller join the first save instead of persisting a duplicate session
+  /// (or throwing StateError once the first has reached Idle). It is kept
+  /// after completion so a late losing path still resolves gracefully, and
+  /// reset by start() so a new cycle never sees a stale future.
+  Future<Either<StorageFailure, Session>>? _stopFuture;
+  static const _startKey = 'timer_start_ms';
+  static const _accKey = 'timer_paused_accumulated_secs';
+  static const _profileKey = 'timer_profile_id';
+
+  /// An unsaved draft (TimerStopped), as Session JSON, so a restart offers
+  /// it back instead of losing it. Written when a draft is built or an
+  /// Undo restores one; removed when it is saved or discarded.
+  static const _draftKey = 'timer_unsaved_draft';
+  static final _dayFmt = DateFormat('yyyy-MM-dd');
+
+  int get _durationMs {
+    final prefs = ref.read(userPrefsProvider).value;
+    return (prefs?.autoStopThresholdHours ?? 2) * 3600 * 1000;
+  }
+
+  @override
+  TimerState build() {
+    ref.onDispose(() => _ticker?.cancel());
+    return _reconstructFromPrefs();
+  }
+
+  TimerState _reconstructFromPrefs() {
+    final prefs = ref.read(sharedPreferencesProvider);
+    final draft = _readDraft(prefs.getString(_draftKey));
+    if (draft != null) return TimerStopped(session: draft);
+    final startMs = prefs.getInt(_startKey);
+    final accSecs = prefs.getInt(_accKey) ?? 0;
+    final profileId = prefs.getString(_profileKey) ?? 'default';
+
+    // Idle: neither a running start time nor a paused snapshot.
+    if (startMs == null && accSecs <= 0) return const TimerIdle();
+
+    // Paused: no running start, but a positive accumulated snapshot. This
+    // path handles service-side pause (lockscreen) when Dart was dead — the
+    // foreground service writes the correct accKey to SharedPreferences so
+    // the user doesn't lose the moment they tapped Pause.
+    if (startMs == null) {
+      final pausedState = TimerPaused(
+        accumulated: Duration(seconds: accSecs),
+        profileId: profileId,
+      );
+      // Start the ticker so the UI stays alive. Notification actions are
+      // delivered via MethodChannel push (primary) or SharedPrefs flag
+      // polling (fallback when engine was dead at tap time).
+      _startTicker();
+      unawaited(showTimerPaused(profileId, Duration(seconds: accSecs),
+          durationMs: _durationMs));
+      return pausedState;
+    }
+
+    // Running: start time present; accumulated may carry over from a prior
+    // pause-resume cycle.
+    final reconstructed = TimerRunning(
+      startTime: DateTime.fromMillisecondsSinceEpoch(startMs),
+      accumulated: Duration(seconds: accSecs),
+      profileId: profileId,
+    );
+    _startTicker();
+
+    final stopKey = _notifStopKey(profileId);
+    if (prefs.getBool(stopKey) == true) {
+      Future.microtask(() async {
+        await prefs.remove(stopKey);
+        await stopAndSave();
+      });
+    } else {
+      unawaited(showTimerRunning(
+        profileId: profileId,
+        startTime: DateTime.fromMillisecondsSinceEpoch(startMs),
+        accumulated: Duration(seconds: accSecs),
+        durationMs: _durationMs,
+      ));
+    }
+    return reconstructed;
+  }
+
+  void _startTicker() {
+    _ticker?.cancel();
+    _tickCount = 0;
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) async {
+      final prefs = ref.read(sharedPreferencesProvider);
+      await prefs.reload();
+
+      final profileId = switch (state) {
+        TimerRunning(:final profileId) => profileId,
+        TimerPaused(:final profileId) => profileId,
+        _ => 'default',
+      };
+
+      if (prefs.getBool(_notifStopKey(profileId)) == true) {
+        await prefs.remove(_notifStopKey(profileId));
+        await stopAndSave();
+        return;
+      }
+      if (prefs.getBool(_notifPauseKey(profileId)) == true) {
+        await prefs.remove(_notifPauseKey(profileId));
+        await pause();
+        return;
+      }
+      if (prefs.getBool(_notifResumeKey(profileId)) == true) {
+        await prefs.remove(_notifResumeKey(profileId));
+        await resume();
+        return;
+      }
+
+      // Re-emit state so Riverpod triggers UI rebuilds with fresh elapsed time.
+      if (state is TimerRunning) {
+        final r = state as TimerRunning;
+        state = TimerRunning(
+          startTime: r.startTime,
+          accumulated: r.accumulated,
+          profileId: r.profileId,
+        );
+      }
+
+      // Refresh home widget every 60s while the timer runs.
+      _tickCount++;
+      if (_tickCount % 60 == 0 && state is TimerRunning) {
+        _updateHomeWidget();
+      }
+    });
+  }
+
+  Future<void> start() async {
+    if (state is! TimerIdle) return;
+    _stopFuture = null; // new cycle — a stale stop future must not be replayed
+    final profileId = ref.read(activeProfileIdProvider);
+    final now = DateTime.now();
+    final prefs = ref.read(sharedPreferencesProvider);
+    await prefs.setInt(_startKey, now.millisecondsSinceEpoch);
+    await prefs.setString(_profileKey, profileId);
+    await prefs.remove(_accKey);
+    state = TimerRunning(
+      startTime: now,
+      accumulated: Duration.zero,
+      profileId: profileId,
+    );
+    _startTicker();
+    unawaited(showTimerRunning(
+      profileId: profileId,
+      startTime: now,
+      durationMs: _durationMs,
+    ));
+    _updateHomeWidget();
+  }
+
+  Future<void> pause({bool fromNative = false}) async {
+    final current = state;
+    if (current is! TimerRunning) return;
+    final elapsed = _computeElapsed(current);
+    final prefs = ref.read(sharedPreferencesProvider);
+    if (fromNative) {
+      // Native already wrote SharedPrefs via writeDartPausedState.
+      // Clear the pending flag so the ticker doesn't double-fire.
+      await prefs.remove(_notifPauseKey(current.profileId));
+    } else {
+      await prefs.remove(_startKey);
+      await prefs.setInt(_accKey, elapsed.inSeconds);
+    }
+    state = TimerPaused(accumulated: elapsed, profileId: current.profileId);
+    if (!fromNative) {
+      unawaited(
+          showTimerPaused(current.profileId, elapsed, durationMs: _durationMs));
+    }
+  }
+
+  Future<void> resume({bool fromNative = false}) async {
+    final current = state;
+    if (current is! TimerPaused) return;
+    final now = DateTime.now();
+    final prefs = ref.read(sharedPreferencesProvider);
+    if (fromNative) {
+      await prefs.remove(_notifResumeKey(current.profileId));
+    } else {
+      await prefs.setInt(_startKey, now.millisecondsSinceEpoch);
+      await prefs.setString(_profileKey, current.profileId);
+      await prefs.setInt(_accKey, current.accumulated.inSeconds);
+    }
+    state = TimerRunning(
+      startTime: now,
+      accumulated: current.accumulated,
+      profileId: current.profileId,
+    );
+    _startTicker();
+    if (!fromNative) {
+      unawaited(showTimerRunning(
+        profileId: current.profileId,
+        startTime: now,
+        accumulated: current.accumulated,
+        durationMs: _durationMs,
+      ));
+    }
+  }
+
+  Future<Session> buildDraftSession() async {
+    final current = state;
+    if (current is! TimerRunning && current is! TimerPaused) {
+      throw StateError('Cannot build draft session in state: $current');
+    }
+
+    _ticker?.cancel();
+    final prefs = ref.read(sharedPreferencesProvider);
+    await prefs.remove(_startKey);
+    await prefs.remove(_accKey);
+    await prefs.remove(_profileKey);
+
+    final now = DateTime.now();
+    final Duration elapsed;
+    final DateTime startTime;
+    final String profileId;
+
+    if (current is TimerRunning) {
+      elapsed = _computeElapsed(current);
+      startTime = current.startTime;
+      profileId = current.profileId;
+    } else {
+      final paused = current as TimerPaused;
+      elapsed = paused.accumulated;
+      startTime = now.subtract(elapsed);
+      profileId = paused.profileId;
+    }
+
+    final session = Session(
+      id: const Uuid().v4(),
+      startTime: startTime.millisecondsSinceEpoch,
+      endTime: now.millisecondsSinceEpoch,
+      durationSecs: clampSessionDurationSecs(elapsed.inSeconds),
+      notes: null,
+      dateDay: _dayFmt.format(startTime),
+      profileId: profileId,
+      locationLabel: null,
+      lat: null,
+      lng: null,
+      createdAt: now.millisecondsSinceEpoch,
+      updatedAt: now.millisecondsSinceEpoch,
+    );
+
+    await _persistDraft(session);
+    state = TimerStopped(session: session);
+    return session;
+  }
+
+  Future<Either<StorageFailure, Unit>> confirmSession(Session session) async {
+    final repo = ref.read(sessionsRepositoryProvider);
+    // 'everyone' sessions store profileId=null — counts once in stats, appears
+    // in every profile's filtered view via the IS NULL clause in watchAllFiltered.
+    final toSave = session.profileId == kEveryoneProfileId
+        ? session.copyWith(profileId: const Value(null))
+        : session;
+    final result = await repo.saveSession(toSave);
+    // Don't treat a failed write as success: keep the session recoverable
+    // (state stays TimerStopped) so the caller can surface the error and the
+    // user can retry, instead of silently losing a tracked session.
+    if (result.isLeft()) return result;
+
+    final newBadges =
+        await ref.read(badgesRepositoryProvider).checkAndAwardMilestones();
+    if (newBadges.isNotEmpty) {
+      ref.read(newlyEarnedBadgesProvider.notifier).show(newBadges);
+    }
+    final profileId = session.profileId ?? 'default';
+    await _persistDraft(null);
+    state = const TimerIdle();
+    _updateHomeWidget();
+    unawaited(dismissTimerNotification(profileId));
+    return result;
+  }
+
+  /// Auto-stop path: build the elapsed session AND persist it immediately.
+  /// buildDraftSession() clears the durable timer keys, so the draft would
+  /// otherwise live only in memory — a forgotten multi-hour timer would be lost
+  /// if the app were killed before the user got to Review & Save. Auto-stop
+  /// means the user isn't there to review, so we save it (they can still edit or
+  /// delete it from history).
+  Future<void> autoStopAndSave() async {
+    final current = state;
+    if (current is! TimerRunning && current is! TimerPaused) return;
+    final draft = await buildDraftSession();
+    await confirmSession(draft);
+  }
+
+  /// Ends the timer and saves the session. A failed save (owner's ruling,
+  /// board-0167) keeps the session as an unsaved draft, the same TimerStopped
+  /// state a failed auto-stop leaves, so the household can Save it again,
+  /// edit it or discard it. The failure is returned so the screen says
+  /// "Couldn’t save the session" and never "Session saved".
+  Future<Either<StorageFailure, Session>> stopAndSave({bool fromNative = false}) {
+    // Latch check FIRST, before the type guard — ordering is load-bearing.
+    // Checking the guard first would convert the duplicate-save bug into an
+    // uncaught StateError on whichever stop path loses the race.
+    final inFlight = _stopFuture;
+    if (inFlight != null) return inFlight;
+
+    final current = state;
+    if (current is! TimerRunning && current is! TimerPaused) {
+      throw StateError('Cannot stop in state: $current');
+    }
+
+    // Synchronously (no await yet): cancel the ticker, leave the stoppable
+    // states, and publish the latch — so any re-entrant stop path joins this
+    // save instead of passing the guard again.
+    _ticker?.cancel();
+    state = const TimerIdle();
+    final future = _stopAndSaveImpl(current, fromNative: fromNative);
+    _stopFuture = future;
+    return future;
+  }
+
+  Future<Either<StorageFailure, Session>> _stopAndSaveImpl(
+    TimerState current, {
+    required bool fromNative,
+  }) async {
+    final prefs = ref.read(sharedPreferencesProvider);
+    await prefs.remove(_startKey);
+    await prefs.remove(_accKey);
+    await prefs.remove(_profileKey);
+
+    final now = DateTime.now();
+    final Duration elapsed;
+    final DateTime startTime;
+    final String profileId;
+
+    if (current is TimerRunning) {
+      elapsed = _computeElapsed(current);
+      startTime = current.startTime;
+      profileId = current.profileId;
+    } else {
+      final paused = current as TimerPaused;
+      elapsed = paused.accumulated;
+      startTime = now.subtract(elapsed);
+      profileId = paused.profileId;
+    }
+
+    if (fromNative) {
+      await prefs.remove(_notifStopKey(profileId));
+    }
+
+    final baseId = const Uuid().v4();
+    final repo = ref.read(sessionsRepositoryProvider);
+
+    final effectiveProfileId =
+        profileId == kEveryoneProfileId ? null : profileId;
+
+    final firstSession = Session(
+      id: baseId,
+      startTime: startTime.millisecondsSinceEpoch,
+      endTime: now.millisecondsSinceEpoch,
+      durationSecs: clampSessionDurationSecs(elapsed.inSeconds),
+      notes: null,
+      dateDay: _dayFmt.format(startTime),
+      profileId: effectiveProfileId,
+      locationLabel: null,
+      lat: null,
+      lng: null,
+      createdAt: now.millisecondsSinceEpoch,
+      updatedAt: now.millisecondsSinceEpoch,
+    );
+    final saved = await repo.saveSession(firstSession);
+    if (saved.isLeft()) {
+      // Keep it, do not lose it. The draft carries the timer's own profile
+      // id (Everyone included), as buildDraftSession does, so confirmSession
+      // maps it the same way when the household saves it again. If a new
+      // timer started while this save was in flight, that timer is left
+      // alone; the draft is still written, so it comes back after a restart.
+      final draft = firstSession.copyWith(profileId: Value(profileId));
+      await _persistDraft(draft);
+      if (state is TimerIdle) state = TimerStopped(session: draft);
+      if (!fromNative) {
+        unawaited(dismissTimerNotification(profileId));
+      }
+      return saved.map((_) => firstSession);
+    }
+
+    final newBadges =
+        await ref.read(badgesRepositoryProvider).checkAndAwardMilestones();
+    if (newBadges.isNotEmpty) {
+      ref.read(newlyEarnedBadgesProvider.notifier).show(newBadges);
+    }
+    // state is already TimerIdle — set synchronously in stopAndSave before
+    // the first await, so it must NOT be re-set here (a start() issued while
+    // the save was in flight would be clobbered back to Idle).
+    _updateHomeWidget();
+    if (!fromNative) {
+      unawaited(dismissTimerNotification(profileId));
+    }
+    return Right(firstSession);
+  }
+
+  /// Refresh the home widget after [dateDay]'s sessions changed. The widget
+  /// has a single fixed slot — today's total — so the parameter signals
+  /// *that* data changed; it deliberately does NOT select which day is
+  /// rendered (history edits and manual entries pass historical days).
+  Future<void> refreshWidget(String dateDay) => _updateHomeWidget();
+
+  Future<void> _updateHomeWidget() async {
+    try {
+      // The 'today_hours' slot must only ever represent TODAY. Compute the
+      // key here instead of trusting callers: history/edit/manual-entry and
+      // cross-midnight stops legitimately operate on other days.
+      final today = _dayFmt.format(DateTime.now());
+      var secs = await ref
+          .read(sessionsRepositoryProvider)
+          .watchSecondsForDay(today)
+          .first;
+      // Include active timer elapsed if the timer is running or paused today.
+      if (state is TimerRunning) {
+        secs += elapsed.inSeconds;
+      } else if (state case TimerPaused(:final accumulated)) {
+        secs += accumulated.inSeconds;
+      }
+      await HomeWidget.saveWidgetData<String>(
+          'today_hours', Duration(seconds: secs).toHoursLabel());
+      await HomeWidget.updateWidget(
+        androidName: 'SundialWidgetProvider',
+        qualifiedAndroidName: 'com.openhearth.sundial.SundialWidgetProvider',
+      );
+    } catch (e) {
+      debugPrint('[Widget] update failed: $e');
+    }
+  }
+
+  void discard() {
+    final profileId = switch (state) {
+      TimerRunning(:final profileId) => profileId,
+      TimerPaused(:final profileId) => profileId,
+      TimerStopped(:final session) => session.profileId ?? 'default',
+      _ => 'default',
+    };
+    unawaited(_persistDraft(null));
+    state = const TimerIdle();
+    unawaited(dismissTimerNotification(profileId));
+  }
+
+  /// Ends the timer and saves nothing, for a restore. The restore replaces
+  /// every profile and session, so a running or paused timer, or an unsaved
+  /// draft, belongs to a record that is gone: kept, it would later save a
+  /// session for a profile the restore may have removed. Clears every stored
+  /// key the timer rebuilds from, so a restart cannot bring it back, and the
+  /// notification, so its STOP cannot either.
+  ///
+  /// A stop already saving when this runs is left to finish as today: what
+  /// a STOP does around its save is an open question with the owner.
+  Future<void> forget() async {
+    _ticker?.cancel();
+    final profileId = switch (state) {
+      TimerRunning(:final profileId) => profileId,
+      TimerPaused(:final profileId) => profileId,
+      TimerStopped(:final session) => session.profileId ?? 'default',
+      TimerIdle() => null,
+    };
+    state = const TimerIdle();
+    final prefs = ref.read(sharedPreferencesProvider);
+    await Future.wait([
+      prefs.remove(_startKey),
+      prefs.remove(_accKey),
+      prefs.remove(_profileKey),
+      prefs.remove(_draftKey),
+      if (profileId != null) ...[
+        prefs.remove(_notifStopKey(profileId)),
+        prefs.remove(_notifPauseKey(profileId)),
+        prefs.remove(_notifResumeKey(profileId)),
+      ],
+    ]);
+    if (profileId != null) await dismissTimerNotification(profileId);
+  }
+
+  /// Undo for [discard] of an unsaved draft: puts the draft back, but only
+  /// if nothing has started since.
+  void restoreDiscarded(Session session) {
+    if (state is! TimerIdle) return;
+    unawaited(_persistDraft(session));
+    state = TimerStopped(session: session);
+  }
+
+  Session? _readDraft(String? json) {
+    if (json == null) return null;
+    try {
+      return Session.fromJson(jsonDecode(json) as Map<String, dynamic>);
+    } catch (e) {
+      debugPrint('[Timer] unreadable saved draft dropped: $e');
+      return null;
+    }
+  }
+
+  Future<void> _persistDraft(Session? session) {
+    final prefs = ref.read(sharedPreferencesProvider);
+    return session == null
+        ? prefs.remove(_draftKey)
+        : prefs.setString(_draftKey, jsonEncode(session.toJson()));
+  }
+
+  Duration get elapsed => switch (state) {
+        TimerRunning(:final startTime, :final accumulated, profileId: _) =>
+          _computeElapsed(TimerRunning(
+            startTime: startTime,
+            accumulated: accumulated,
+          )),
+        TimerPaused(:final accumulated, profileId: _) => accumulated,
+        _ => Duration.zero,
+      };
+
+  Duration _computeElapsed(TimerRunning r) => Duration(
+        seconds: DateTime.now().difference(r.startTime).inSeconds +
+            r.accumulated.inSeconds,
+      );
+
+  // Notification flag key helpers — default profile uses legacy bare keys
+  // so existing installs aren't affected on upgrade.
+  static String _notifStopKey(String profileId) => profileId == 'default'
+      ? notifPendingStop
+      : '${notifPendingStop}_$profileId';
+  static String _notifPauseKey(String profileId) => profileId == 'default'
+      ? notifPendingPause
+      : '${notifPendingPause}_$profileId';
+  static String _notifResumeKey(String profileId) => profileId == 'default'
+      ? notifPendingResume
+      : '${notifPendingResume}_$profileId';
+}

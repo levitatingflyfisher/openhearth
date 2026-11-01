@@ -1,0 +1,75 @@
+# How to ship the PWA and the APK
+
+Sundial targets **Android** and **the web** today (no iOS pipeline — see
+[limitations.md](../limitations.md)). This covers building both.
+
+## Android APK
+
+```bash
+flutter build apk --release
+# output: build/app/outputs/flutter-apk/app-release.apk
+```
+
+- Core-library desugaring is enabled and the Gradle wrapper is pinned
+  (`android/app/build.gradle.kts`, `android/gradle/wrapper/`), so a clean machine
+  builds without extra setup beyond a JDK Flutter accepts.
+- The launcher icon is generated from `assets/icon/app_icon.png` via
+  `flutter_launcher_icons` (`android: true`, adaptive icon background `#F5F0E8`). If
+  you change the icon, re-run `dart run flutter_launcher_icons`.
+- The app declares an Android **home-screen widget** and a **timer notification**;
+  both communicate with Dart over a platform channel in `main.dart`
+  (`launchSource` / `timerAction`). Test them on a real device after any change to
+  the timer control surfaces.
+
+## Web PWA
+
+```bash
+flutter build web --release
+# output: build/web/  (deploy this directory as static files)
+```
+
+Two things that are easy to get wrong:
+
+1. **Drift needs its web engine shipped.** The database is configured with
+   `DriftWebOptions(sqlite3Wasm: 'sqlite3.wasm', driftWorker: 'drift_worker.js')`
+   (`lib/core/storage/app_database.dart`). Both files live in `web/` and must be
+   served alongside the build — without them, Drift throws at startup and the app
+   shows a blank screen.
+2. **Persistent storage.** The web build requests persistent storage so the browser
+   doesn't evict the local database under storage pressure. Keep that request in the
+   web bootstrap when editing `web/index.html`.
+
+Layout note: every top-level screen caps its content at **640dp** with `OhPage`
+and centres it on wider viewports, while app bars stay full width, so the mobile
+layout reads well in a desktop browser. New screens do the same.
+
+### The app's own address and the move page
+
+Sundial on the web moves to its own address, `sundial.familyflourishing.org`
+(owner ruling, 15 Nov 2026), once that domain is live. `web/CNAME` names it,
+and the build copies it to the site root. Two web builds then come from the
+same code:
+
+```bash
+# The app at its own address
+flutter build web --release --base-href /
+
+# The move page, at levitatingflyfisher.github.io/move/sundial/
+flutter build web --release --base-href /move/sundial/ --dart-define=OH_MOVE_PAGE=true
+```
+
+The move page stays up for good, because data saved at the old address can
+only be read there. It opens straight to the move screen, counts the
+records, saves the app's own backup file and writes nothing at start
+(`lib/features/move/move_page.dart`). It goes in the landing repo under
+`move/sundial/`, without the `CNAME` file.
+
+## Before you tag a release
+
+```bash
+flutter analyze      # zero issues
+flutter test         # green (regenerate goldens only for intentional UI changes)
+```
+
+The release GitHub Actions workflow (`.github/workflows/`) runs the tests, then
+builds and publishes on a `v*.*.*` tag push.

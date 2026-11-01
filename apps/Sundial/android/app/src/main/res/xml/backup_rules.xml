@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The same rule as data_extraction_rules.xml, for Android 11 and older
+  (android:fullBackupContent). Everything is backed up except the secure
+  key store file that holds the recovery words.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+</full-backup-content>

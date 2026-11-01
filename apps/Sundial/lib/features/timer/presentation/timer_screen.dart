@@ -1,0 +1,285 @@
+// lib/features/timer/presentation/timer_screen.dart
+import 'package:clock/clock.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_flutter/lucide_flutter.dart';
+import 'package:openhearth_design/openhearth_design.dart';
+import 'package:sundial/core/providers/core_providers.dart';
+import 'package:sundial/features/stats/domain/pace.dart';
+import 'package:sundial/features/timer/domain/timer_state.dart';
+import 'package:sundial/core/storage/app_database.dart' show Session;
+import 'package:sundial/features/timer/presentation/timer_notifier.dart';
+import 'package:sundial/features/timer/presentation/stop_and_report.dart';
+import 'package:sundial/features/timer/presentation/unsaved_session_panel.dart';
+import 'package:sundial/shared/extensions/duration_ext.dart';
+import 'package:sundial/shared/theme/app_spacing.dart';
+import 'package:sundial/shared/theme/app_text_styles.dart';
+import 'package:sundial/shared/widgets/profile_chip_row.dart';
+
+class TimerScreen extends ConsumerWidget {
+  const TimerScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final timerState = ref.watch(timerProvider);
+    final notifier = ref.read(timerProvider.notifier);
+
+    return Scaffold(
+      bottomNavigationBar:
+          OhUndoBar(controller: ref.watch(timerUndoControllerProvider)),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          child: Column(
+            children: [
+              const ProfileChipRow(),
+              const SizedBox(height: AppSpacing.sm),
+              Expanded(
+                // The timer block and the stats row scroll together. When
+                // they fit, the block is centred above the stats as before.
+                // At large text scales the stats row grows tall; held fixed
+                // below, it shrank the timer's window until START was
+                // hidden, so here it scrolls below the controls instead.
+                child: CustomScrollView(
+                  slivers: [
+                    SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Column(
+                        children: [
+                          Expanded(
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  _TimerDisplay(
+                                      state: timerState, notifier: notifier),
+                                  const SizedBox(height: AppSpacing.xl),
+                                  _TimerControls(
+                                      state: timerState, notifier: notifier),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const _StatsRow(),
+                          const SizedBox(height: AppSpacing.md),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TimerDisplay extends StatelessWidget {
+  const _TimerDisplay({required this.state, required this.notifier});
+  final TimerState state;
+  final TimerNotifier notifier;
+
+  @override
+  Widget build(BuildContext context) {
+    final elapsed = notifier.elapsed;
+    return Column(
+      children: [
+        // At large text scales "00:00" is wider than a phone; wrapped, it
+        // read as "00:" over "00" and pushed START out of sight. Scale the
+        // clock down to the width instead, so it stays one line.
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            elapsed.toHhMm(),
+            maxLines: 1,
+            softWrap: false,
+            style: AppTextStyles.timerDisplay.copyWith(
+              color: Theme.of(context).colorScheme.onSurface,
+            ),
+          ),
+        ),
+        if (state is TimerRunning)
+          Padding(
+            padding: const EdgeInsets.only(top: AppSpacing.sm),
+            child: Text(
+              'Running since ${_formatStart((state as TimerRunning).startTime)}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  String _formatStart(DateTime dt) {
+    final h = dt.hour;
+    final m = dt.minute.toString().padLeft(2, '0');
+    final period = h >= 12 ? 'PM' : 'AM';
+    final displayH = h % 12 == 0 ? 12 : h % 12;
+    return '$displayH:$m $period';
+  }
+}
+
+class _TimerControls extends StatelessWidget {
+  const _TimerControls({required this.state, required this.notifier});
+  final TimerState state;
+  final TimerNotifier notifier;
+
+  @override
+  Widget build(BuildContext context) {
+    return switch (state) {
+      TimerIdle() => _buildStart(context),
+      TimerRunning() => _buildRunning(context),
+      TimerPaused() => _buildPaused(context),
+      TimerStopped(:final session) => _buildStopped(context, session),
+    };
+  }
+
+  Widget _buildStart(BuildContext context) => FilledButton.icon(
+        onPressed: notifier.start,
+        icon: const Icon(LucideIcons.play),
+        label: const Text('START'),
+        style: FilledButton.styleFrom(minimumSize: const Size(160, 52)),
+      );
+
+  // The two-button rows wrap: at 3x text PAUSE and STOP side by side are
+  // wider than a 320 phone and overflowed.
+  Widget _buildRunning(BuildContext context) => Wrap(
+        alignment: WrapAlignment.center,
+        spacing: AppSpacing.md,
+        runSpacing: AppSpacing.sm,
+        children: [
+          OutlinedButton(
+            onPressed: notifier.pause,
+            child: const Text('PAUSE'),
+          ),
+          FilledButton(
+            onPressed: () => stopAndReport(context, notifier),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            child: const Text('STOP'),
+          ),
+        ],
+      );
+
+  Widget _buildPaused(BuildContext context) => Wrap(
+        alignment: WrapAlignment.center,
+        spacing: AppSpacing.md,
+        runSpacing: AppSpacing.sm,
+        children: [
+          FilledButton.icon(
+            onPressed: notifier.resume,
+            icon: const Icon(LucideIcons.play),
+            label: const Text('RESUME'),
+          ),
+          OutlinedButton(
+            onPressed: () => stopAndReport(context, notifier),
+            child: const Text('STOP'),
+          ),
+        ],
+      );
+
+  // Reached when a STOP's or an auto-stop's save failed and the draft was
+  // kept.
+  Widget _buildStopped(BuildContext context, Session session) =>
+      UnsavedSessionPanel(session: session);
+}
+
+class _StatsRow extends ConsumerWidget {
+  const _StatsRow();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // clock.now() (not DateTime.now()) so tests can pin which day/year the
+    // Today / This Year streams aggregate — same class as StatsScreen's keys.
+    final now = clock.now();
+    final repo = ref.watch(sessionsRepositoryProvider);
+    final todayKey =
+        '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    final prefsAsync = ref.watch(userPrefsProvider);
+    final annualGoal = prefsAsync.value?.annualGoalHours ?? 1000;
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceAround,
+      children: [
+        Expanded(
+          child: _StatBox(
+            label: 'Today',
+            valueStream: repo.watchSecondsForDay(todayKey),
+          ),
+        ),
+        Expanded(
+          child: _StatBox(
+            label: 'This Year',
+            valueStream: repo.watchSecondsForYear(now.year.toString()),
+            goalHours: annualGoal,
+            pace: (done) =>
+                yearPace(done: done, goalHours: annualGoal, now: now),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StatBox extends StatelessWidget {
+  const _StatBox({
+    required this.label,
+    required this.valueStream,
+    this.goalHours,
+    this.pace,
+  });
+  final String label;
+  final Stream<int> valueStream;
+  final int? goalHours;
+  final Pace Function(Duration done)? pace;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<int>(
+      stream: valueStream,
+      builder: (context, snap) {
+        final secs = snap.data ?? 0;
+        final dur = Duration(seconds: secs);
+        return Column(
+          children: [
+            Text(
+              dur.toHoursLabel(),
+              textAlign: TextAlign.center,
+              style: AppTextStyles.statValue.copyWith(
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
+            ),
+            if (goalHours != null)
+              Text(
+                'of ${goalHours}h goal',
+                textAlign: TextAlign.center,
+                style: AppTextStyles.statLabel.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: AppTextStyles.statLabel.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            if (pace != null)
+              Text(
+                pace!(dur).phrase,
+                textAlign: TextAlign.center,
+                style: AppTextStyles.statLabel.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}

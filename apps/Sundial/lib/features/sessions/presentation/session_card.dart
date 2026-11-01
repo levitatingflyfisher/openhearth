@@ -1,0 +1,143 @@
+// lib/features/sessions/presentation/session_card.dart
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:lucide_flutter/lucide_flutter.dart';
+import 'package:openhearth_design/openhearth_design.dart';
+import 'package:sundial/core/storage/app_database.dart';
+import 'package:sundial/features/profiles/presentation/profiles_screen.dart'
+    show ProfileAvatar;
+import 'package:sundial/shared/extensions/duration_ext.dart';
+
+class SessionCard extends StatelessWidget {
+  const SessionCard({
+    super.key,
+    required this.session,
+    required this.onTap,
+    required this.onDelete,
+    this.showEveryoneTag = false,
+    this.profile,
+  });
+  final Session session;
+  final VoidCallback onTap;
+
+  /// Deletes the session and returns whether the write succeeded. The card
+  /// leaves the list only on success; on a failure it slides back.
+  final Future<bool> Function() onDelete;
+
+  /// When true, a null-profile session shows a subtle "Everyone" chip so it's
+  /// distinguishable from sessions exclusive to the current profile filter.
+  final bool showEveryoneTag;
+
+  /// The owning profile for this session, if any. When non-null, a small
+  /// colored dot (or emoji) is rendered next to the duration so that, in the
+  /// Everyone view, it's clear which household member the session belongs to.
+  /// Callers should only set this when 2+ profiles exist — solo users should
+  /// not see a redundant dot on every session.
+  final Profile? profile;
+
+  static final _dateFmt = DateFormat('EEE, MMM d');
+
+  @override
+  Widget build(BuildContext context) {
+    final dur = Duration(seconds: session.durationSecs);
+    final date = DateTime.fromMillisecondsSinceEpoch(session.startTime);
+    final cs = Theme.of(context).colorScheme;
+    final isEveryone = session.profileId == null;
+
+    return Dismissible(
+      key: Key(session.id),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 16),
+        color: cs.error,
+        child: const Icon(LucideIcons.trash2, color: Colors.white),
+      ),
+      // A swipe is an easy gesture, so it asks first (fleet delete ruling),
+      // naming the session so the dialog answers "which one?" on its own.
+      // The delete runs here, before the card is dismissed, so a failed
+      // write leaves the card in place instead of hiding a stored session.
+      confirmDismiss: (_) async {
+        final confirmed = await showOhConfirm(
+          context,
+          title: 'Delete ${dur.toHoursLabel()} on ${_dateFmt.format(date)}?',
+          // Honest: this delete is permanent (no soft delete behind a swipe).
+          message: 'It will be gone from your history for good.',
+          confirmLabel: 'Delete session',
+          destructive: true,
+        );
+        if (!confirmed) return false;
+        return onDelete();
+      },
+      child: ListTile(
+        onTap: onTap,
+        // A Wrap, not a Row: at large text on a narrow phone the duration
+        // and the "Everyone" tag do not fit side by side (the Row overflowed
+        // and cut the tag off), so the tag moves to its own line.
+        title: Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (profile != null) ...[
+                  ProfileAvatar(profile: profile!, size: 14),
+                  const SizedBox(width: 6),
+                ],
+                Text(
+                  dur.toHoursLabel(),
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+            if (showEveryoneTag && isEveryone)
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.users,
+                        size: 12, color: cs.onSurfaceVariant),
+                    const SizedBox(width: 3),
+                    Text(
+                      'Everyone',
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelSmall
+                          ?.copyWith(color: cs.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_dateFmt.format(date)),
+            if (session.notes != null)
+              Text(
+                session.notes!,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: cs.onSurfaceVariant,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+          ],
+        ),
+        trailing: const Icon(LucideIcons.chevronRight),
+      ),
+    );
+  }
+}

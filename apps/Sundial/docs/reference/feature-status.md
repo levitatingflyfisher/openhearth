@@ -1,0 +1,71 @@
+# Reference: feature status
+
+What's shipped, partial, or planned — grounded in the code as of `0.1.0`. Legend:
+**Shipped** = built and tested · **Partial** = present but incomplete/stubbed ·
+**Planned** = designed, not built.
+
+## Core (Ghost tier — local, offline)
+
+| Feature | Status | Notes |
+|---|---|---|
+| Timer (start / pause / stop) | Shipped | Sealed state machine; background-safe |
+| Auto-stop | Shipped | **Opt-in, off by default**, 2h threshold, checked on resume |
+| Android widget + timer notification | Shipped | Platform channel in `main.dart` |
+| Manual entry ("Add Time") | Shipped | Any past date |
+| Session editing (duration / date / notes) | Shipped | No lock-out; retiming moves start/end/`dateDay` |
+| Delete session | Shipped | Swipe asks first, naming the session |
+| Remove a person | Shipped | Removes at once, with an Undo that stays until you leave the screen |
+| History timeline | Shipped | Reverse chronological, profile-filterable |
+| Session notes | Shipped | Short label, optional |
+| Goals (annual + optional monthly) | Shipped | Default 1000h/yr; pace computed against expected-to-date, amber only when behind |
+| Stats (today / month / year / all-time) | Shipped | Reactive off `Sessions` |
+| Cumulative chart | Shipped | |
+| Heatmap | Shipped | |
+| Monthly breakdown | Shipped | Bar per month of the current year |
+| Badges + confetti | Shipped | Fixed milestone set; once earned, never revoked |
+| Flow / Rich modes | Shipped | Single `AppMode` preference |
+| Flow 7-day dot row | Shipped | Tap today's dot to edit today's total |
+| Multiple profiles | Shipped | **Local** only — not accounts/sync |
+| Export: JSON / PDF / plain text | Shipped | |
+| Import: JSON | Shipped | Row-tolerant; merges into what the device holds |
+| Encrypted backup (`.ohbk`): export and restore | Shipped | Keyed by 12 recovery words; restore replaces what the device holds. See [ADR-0007](../adr/0007-encrypted-backup-seed-phrase.md) |
+| Preferences: theme (light / dark / follow phone, in the app bar), 12/24h, week start, timer style | Shipped | See [data-model.md](data-model.md) |
+| Onboarding (Flow by default; Rich offered from Flow after the first session; History, Stats and Settings open from Flow) | Shipped | |
+
+## Sync & accounts
+
+| Feature | Status | Notes |
+|---|---|---|
+| Ghost tier (local, no account) | Shipped | The only live tier |
+| Token tier (anonymous multi-device sync) | Planned | `upgradeToToken()` throws `UnimplementedError` |
+| Named tier (family accounts) | Planned | `upgradeToNamed()` throws `UnimplementedError` |
+| Shared family view / calendar | Planned | Depends on sync |
+| Encrypted-blob relay | Planned | Design in [ADR-0004](../adr/0004-local-first-ghost-tier.md) |
+
+## Enrichment
+
+| Feature | Status | Notes |
+|---|---|---|
+| Location columns on sessions | Partial | Nullable `locationLabel`/`lat`/`lng` exist; unused |
+| Adventure map (manual pins) | Planned | No live GPS, ever |
+| Photos per session | Planned | |
+| Achievements beyond badges | Planned | |
+| Light social sharing ("share my year") | Planned | Opt-in only if built |
+
+## Platforms
+
+| Target | Status | Notes |
+|---|---|---|
+| Android | Shipped | APK build + release workflow |
+| Web (PWA) | Shipped | Drift on `sqlite3.wasm`; content capped at 640dp and centred (`OhPage`) |
+| iOS | Planned | No build/signing/release pipeline today |
+| Desktop | Planned | Stretch |
+
+## Caveats
+
+- **Badges are latched:** a badge stays earned if the all-time total later drops
+  below its threshold. See [concepts.md § badges](../concepts.md#badges).
+- **No CSV export.** JSON / PDF / text and the encrypted `.ohbk` only.
+
+For the reasoning behind the local-first, no-account posture and the other
+load-bearing choices, see the [ADRs](../adr/).

@@ -1,0 +1,360 @@
+import 'package:drift/native.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sundial/core/providers/core_providers.dart';
+import 'package:sundial/core/storage/app_database.dart';
+import 'package:sundial/features/timer/domain/timer_state.dart';
+import 'package:sundial/features/timer/presentation/timer_notifier.dart';
+import 'package:fpdart/fpdart.dart';
+import 'package:sundial/core/error/failures.dart';
+import 'package:sundial/features/sessions/domain/sessions_repository.dart';
+
+/// A sessions repo whose writes always fail — to prove a failed save is
+/// surfaced, not silently treated as success.
+class _FailingSessionsRepo implements SessionsRepository {
+  @override
+  Future<Either<StorageFailure, Unit>> saveSession(Session s) async =>
+      const Left(StorageFailure('disk full'));
+  // The home-widget refresh reads today's total after every write; without
+  // this the fake threw NoSuchMethodError into the test log.
+  @override
+  Stream<int> watchSecondsForDay(String dateDay) => Stream.value(0);
+  @override
+  dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
+}
+
+ProviderContainer makeContainer({Map<String, Object> prefsValues = const {}}) {
+  SharedPreferences.setMockInitialValues(prefsValues);
+  return ProviderContainer(
+    overrides: [
+      appDatabaseProvider.overrideWith((_) {
+        final db = AppDatabase(NativeDatabase.memory());
+        return db;
+      }),
+      sharedPreferencesProvider.overrideWith(
+        (ref) => throw UnimplementedError('call makeContainer with async prefs'),
+      ),
+    ],
+  );
+}
+
+void main() {
+  group('TimerNotifier', () {
+    test('initial state is idle', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      expect(container.read(timerProvider), isA<TimerIdle>());
+    });
+
+    test('start transitions idle → running', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      await container.read(timerProvider.notifier).start();
+      expect(container.read(timerProvider), isA<TimerRunning>());
+    });
+
+    test('auto-stop persists the elapsed session (not lost on app kill)',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final db = AppDatabase(NativeDatabase.memory());
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => db),
+      ]);
+      addTearDown(container.dispose);
+
+      final notifier = container.read(timerProvider.notifier);
+      await notifier.start();
+      await notifier.autoStopAndSave();
+
+      expect(container.read(timerProvider), isA<TimerIdle>());
+      final rows = await db.select(db.sessions).get();
+      expect(rows, hasLength(1),
+          reason: 'auto-stop must persist the session, not keep it only in memory');
+    });
+
+    test('undoing a discard never clobbers a timer started since', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider
+            .overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      final notifier = container.read(timerProvider.notifier);
+      await notifier.start();
+      final draft = await notifier.buildDraftSession();
+      notifier.discard();
+      await notifier.start();
+      notifier.restoreDiscarded(draft);
+      expect(container.read(timerProvider), isA<TimerRunning>());
+
+      await notifier.pause();
+      notifier.discard();
+      notifier.restoreDiscarded(draft);
+      expect(container.read(timerProvider), isA<TimerStopped>());
+    });
+
+    test('confirmSession surfaces a failed write and keeps the session',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+        sessionsRepositoryProvider.overrideWith((_) => _FailingSessionsRepo()),
+      ]);
+      addTearDown(container.dispose);
+
+      final notifier = container.read(timerProvider.notifier);
+      await notifier.start();
+      await notifier.buildDraftSession();
+      final stopped = container.read(timerProvider);
+      expect(stopped, isA<TimerStopped>());
+
+      final result =
+          await notifier.confirmSession((stopped as TimerStopped).session);
+
+      expect(result.isLeft(), isTrue,
+          reason: 'a failed write must surface, not be treated as success');
+      expect(container.read(timerProvider), isA<TimerStopped>(),
+          reason: 'the session must stay recoverable, not be cleared to Idle');
+    });
+
+    test('pause transitions running → paused', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      await container.read(timerProvider.notifier).start();
+      await container.read(timerProvider.notifier).pause();
+      expect(container.read(timerProvider), isA<TimerPaused>());
+    });
+
+    test('resume transitions paused → running', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      await container.read(timerProvider.notifier).start();
+      await container.read(timerProvider.notifier).pause();
+      await container.read(timerProvider.notifier).resume();
+      expect(container.read(timerProvider), isA<TimerRunning>());
+    });
+
+    test('stop transitions running → stopped with draft session', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      await container.read(timerProvider.notifier).start();
+      await container.read(timerProvider.notifier).buildDraftSession();
+      expect(container.read(timerProvider), isA<TimerStopped>());
+    });
+
+    test('cold resume reconstructs running state from SharedPreferences', () async {
+      SharedPreferences.setMockInitialValues({
+        'timer_start_ms': DateTime.now()
+            .subtract(const Duration(minutes: 30))
+            .millisecondsSinceEpoch,
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      final state = container.read(timerProvider);
+      expect(state, isA<TimerRunning>());
+      final elapsed = container.read(timerProvider.notifier).elapsed;
+      expect(elapsed.inMinutes, closeTo(30, 1));
+    });
+  });
+
+  // Two independent stop paths exist in production: the native MethodChannel
+  // push (main.dart -> stopAndSave(fromNative: true)) and the 1s
+  // SharedPreferences-flag ticker (timer_notifier.dart). Both can fire for
+  // the same tap. Without an in-flight latch each call passes the state
+  // guard (state only becomes Idle after several awaits) and persists its
+  // own duplicate session — or, in the reverse interleaving, the loser
+  // throws an uncaught StateError inside the ticker callback.
+  group('TimerNotifier concurrent stop', () {
+    test(
+        'two overlapping stopAndSave calls save exactly one session '
+        'and neither throws', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final db = AppDatabase(NativeDatabase.memory());
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => db),
+      ]);
+      addTearDown(container.dispose);
+
+      final notifier = container.read(timerProvider.notifier);
+      await notifier.start();
+
+      // Fire both stop paths WITHOUT awaiting between them, exactly as the
+      // native push and the ticker can interleave in production.
+      final f1 = notifier.stopAndSave(fromNative: true);
+      final f2 = notifier.stopAndSave();
+      // Neither future may throw (guards against the reverse-interleaving
+      // StateError); a count-only assertion would green-light a fix that
+      // still throws on the losing path.
+      final results = await Future.wait([f1, f2]);
+      final sessions = [
+        for (final r in results) r.getOrElse((f) => fail('save failed: $f')),
+      ];
+
+      expect(sessions[0].id, sessions[1].id,
+          reason: 'both stop paths must resolve to the SAME saved session');
+      final rows = await db.select(db.sessions).get();
+      expect(rows, hasLength(1),
+          reason: 'concurrent stop paths must not double-save the session');
+    });
+
+    test('a legitimate stop after a fresh start is not served a stale future',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final db = AppDatabase(NativeDatabase.memory());
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => db),
+      ]);
+      addTearDown(container.dispose);
+
+      final notifier = container.read(timerProvider.notifier);
+      await notifier.start();
+      final first = (await notifier.stopAndSave())
+          .getOrElse((f) => fail('save failed: $f'));
+      await notifier.start();
+      final second = (await notifier.stopAndSave())
+          .getOrElse((f) => fail('save failed: $f'));
+
+      expect(second.id, isNot(first.id),
+          reason: 'a second start/stop cycle must persist a NEW session, '
+              'not replay the previous stop');
+      final rows = await db.select(db.sessions).get();
+      expect(rows, hasLength(2));
+    });
+  });
+
+  // Lockscreen pause flow hardening — Item 5 of the 2026-04-09 plan.
+  // The native foreground service writes Dart's timer state directly to
+  // SharedPreferences when the user taps Pause / Resume / Stop on the
+  // notification, so cold-start reconstruction must honor those writes.
+  group('TimerNotifier cold-start Paused reconciliation', () {
+    test(
+        'cold start with paused state (startKey=null, accKey>0) '
+        'reconstructs as TimerPaused', () async {
+      // Service-side pause flow: startKey removed, accKey set to the snapshot
+      // at the moment the notification action fired.
+      SharedPreferences.setMockInitialValues({
+        'timer_paused_accumulated_secs': 150,
+        'timer_profile_id': 'default',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      final state = container.read(timerProvider);
+      expect(state, isA<TimerPaused>(),
+          reason: 'a paused snapshot in prefs must survive cold start — '
+              'otherwise the user loses the state they saw on the lockscreen');
+      final paused = state as TimerPaused;
+      expect(paused.accumulated.inSeconds, 150);
+      expect(paused.profileId, 'default');
+    });
+
+    test(
+        'cold start with no state (both keys unset) reconstructs as Idle',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      expect(container.read(timerProvider), isA<TimerIdle>());
+    });
+
+    test(
+        'cold start with accKey=0 (never-started) reconstructs as Idle, '
+        'not Paused', () async {
+      // Defensive: a zero accKey should not be interpreted as a paused state.
+      SharedPreferences.setMockInitialValues({
+        'timer_paused_accumulated_secs': 0,
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      expect(container.read(timerProvider), isA<TimerIdle>());
+    });
+
+    test(
+        'cold start with both startKey set AND accKey set reconstructs '
+        'as Running (startKey wins)', () async {
+      // Dart's resume() writes startKey=now while keeping accKey as the
+      // base. This must reconstruct as Running with accumulated from accKey.
+      final thirtyMinAgo = DateTime.now()
+          .subtract(const Duration(minutes: 5))
+          .millisecondsSinceEpoch;
+      SharedPreferences.setMockInitialValues({
+        'timer_start_ms': thirtyMinAgo,
+        'timer_paused_accumulated_secs': 600, // 10 min prior pause
+        'timer_profile_id': 'default',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final container = ProviderContainer(overrides: [
+        sharedPreferencesProvider.overrideWithValue(prefs),
+        appDatabaseProvider.overrideWith((_) => AppDatabase(NativeDatabase.memory())),
+      ]);
+      addTearDown(container.dispose);
+
+      final state = container.read(timerProvider);
+      expect(state, isA<TimerRunning>());
+      // 5 min running + 10 min prior pause = ~15 min elapsed
+      final elapsed = container.read(timerProvider.notifier).elapsed;
+      expect(elapsed.inMinutes, closeTo(15, 1));
+    });
+  });
+}

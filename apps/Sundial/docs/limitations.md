@@ -1,0 +1,61 @@
+# Limitations
+
+Read this before adopting Sundial or building on it. It is the honest list of what
+the app does *not* do today. For the framing behind these lines, see the
+[VISION scorecard](../VISION.md#honest-scorecard--built-vs-aspirational); for
+per-feature status, [reference/feature-status.md](reference/feature-status.md).
+
+## No sync, no accounts (yet)
+
+Sundial is **Ghost tier only**: everything is on one device, in one local database.
+
+- There is **no cross-device sync**. Your phone and your partner's phone do not share
+  data.
+- There are **no accounts**. The Token (anonymous sync) and Named (family accounts)
+  tiers are *designed but not built* — `upgradeToToken()` and `upgradeToNamed()`
+  throw `UnimplementedError`. There is no relay, no sync code, and no shared
+  family view. See [ADR-0004](adr/0004-local-first-ghost-tier.md). Encryption code
+  is in use for one thing only, the `.ohbk` backup file
+  ([ADR-0007](adr/0007-encrypted-backup-seed-phrase.md)); it contacts no server.
+
+**Consequence:** back up regularly. The app keeps the only copy of your data on the
+device; if you lose or wipe it without a JSON export or an encrypted `.ohbk` backup
+kept somewhere else, the data is gone, unless the phone's owner turned on Android's
+own backup to Google in Android settings. (A PDF or plain-text export can be read but
+not imported.)
+
+## No enrichment features
+
+The following are described in product notes but **not implemented**:
+
+- **Photos per session.**
+- **Adventure map** (manual pins; never live GPS).
+- **Achievements beyond the fixed badge milestones.**
+- **Light social sharing** ("share my year" cards).
+
+The database reserves nullable `locationLabel` / `lat` / `lng` columns for the map,
+but nothing reads or writes them yet.
+
+## Platform gaps
+
+- **iOS is not a target today.** The launcher-icon config and the release pipeline
+  build for **Android and web** only. The Flutter code is not iOS-hostile, but there
+  is no iOS build, signing, or release story.
+- **Web** runs Drift on `sqlite3.wasm` + a worker and centres each screen's content at 640dp;
+  it's a genuine PWA, but it is the mobile layout adapted, not a bespoke desktop UI.
+
+## Behavior caveats
+
+- **No CSV export.** Export is JSON, PDF, plain text, and the encrypted `.ohbk`
+  backup; only JSON and `.ohbk` come back in.
+- **Auto-stop is coarse.** It fires on the *first app resume* after the threshold is
+  exceeded, not on a wall-clock timer, and only if you enabled it. A session left
+  running while the app is never reopened won't auto-stop until you next open the app.
+- **No reminders or notifications to go outside.** By design — this is a tool, not a
+  nag. If you want prompting, Sundial won't provide it.
+
+## What this is *not*
+
+Not a fitness tracker, not a GPS route recorder, not a social network, not a
+screen-time blocker. It counts hours you tell it about (via the timer or manual
+entry) and helps you see the pattern. That's the whole job.

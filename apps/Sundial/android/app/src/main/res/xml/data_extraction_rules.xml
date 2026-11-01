@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android's own backup is the phone owner's choice (owner ruling, 3 July
+  2026): the app lets it run, and the owner turns it on or off in Android
+  settings. The app's database and preferences are included.
+
+  The one exclusion: the secure key store file, which holds the recovery
+  words. Its key is wrapped by the phone's keystore and never leaves the
+  phone, so a copy elsewhere could not be opened, and the words must not
+  travel through Google backup. The encrypted .ohbk backup is the private
+  way to carry data.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    </device-transfer>
+</data-extraction-rules>
