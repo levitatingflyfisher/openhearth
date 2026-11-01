@@ -1,0 +1,739 @@
+/// parseRssFeed port (donor index.html ~5734): RSS 2.0 / Atom / Media-RSS
+/// to typed models, entity handling (M21), enclosure selection, chapters,
+/// and the 8 MB parse ceiling (M19).
+library;
+
+import 'package:comms_core/comms_core.dart';
+import 'package:test/test.dart';
+
+void main() {
+  group('RSS 2.0', () {
+    test('basic item fields and channel title', () {
+      final feed = parseRssFeed('''
+<rss version="2.0"><channel>
+  <title>My Feed</title>
+  <item>
+    <title>  Ep 1  </title>
+    <link>https://x.com/1</link>
+    <pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>
+    <description>Hello world</description>
+  </item>
+</channel></rss>
+''', 'https://x.com/feed');
+      expect(feed.title, 'My Feed');
+      expect(feed.items, hasLength(1));
+      final it = feed.items.single;
+      expect(it.title, 'Ep 1', reason: 'donor trims item titles');
+      expect(it.link, 'https://x.com/1');
+      expect(it.date, 'Mon, 01 Jan 2024 00:00:00 GMT');
+      expect(it.desc, 'Hello world');
+      expect(it.audio, '');
+      expect(it.enclosure, isNull);
+      expect(it.chapters, isNull);
+      expect(it.chaptersUrl, isNull);
+    });
+
+    test('entity-encoded markup is decoded then stripped (M21)', () {
+      final feed = parseRssFeed('''
+<rss><channel><title>t</title><item>
+  <title>e</title>
+  <description>&amp;lt;script&amp;gt;evil()&amp;lt;/script&amp;gt;Safe &amp;amp; sound</description>
+</item></channel></rss>
+''', 'u');
+      expect(feed.items.single.desc, 'evil()Safe & sound');
+    });
+
+    test('description is capped at 300 chars', () {
+      final feed = parseRssFeed(
+          '<rss><channel><item><description>${'x' * 400}</description>'
+          '</item></channel></rss>',
+          'u');
+      expect(feed.items.single.desc.length, 300);
+    });
+
+    test('CDATA description with markup is stripped', () {
+      final feed = parseRssFeed(
+          '<rss><channel><item><description>'
+          '<![CDATA[<p>Hi <b>there</b></p>]]>'
+          '</description></item></channel></rss>',
+          'u');
+      expect(feed.items.single.desc, 'Hi there');
+    });
+
+    test('content:encoded fallback when description is missing', () {
+      final feed = parseRssFeed('''
+<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>
+  <content:encoded><![CDATA[Body text]]></content:encoded>
+</item></channel></rss>
+''', 'u');
+      expect(feed.items.single.desc, 'Body text');
+    });
+
+    test('a Substack-shaped item (short description-excerpt AND a full '
+        'content:encoded) carries BOTH: desc stays the capped excerpt, '
+        'contentHtml carries the full post uncapped (Campaign 9 Phase 4)',
+        () {
+      final longBody = 'Paragraph. ' * 60; // well past the 300-char cap
+      final feed = parseRssFeed('''
+<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>
+  <title>The whole post</title>
+  <description>A short excerpt for the list.</description>
+  <content:encoded><![CDATA[<p>$longBody</p>]]></content:encoded>
+</item></channel></rss>
+''', 'u');
+      final item = feed.items.single;
+      expect(item.desc, 'A short excerpt for the list.',
+          reason: 'the capped excerpt is untouched — still what list rows '
+              'display');
+      expect(item.contentHtml, contains(longBody.trim()));
+      expect(item.contentHtml!.length, greaterThan(300));
+    });
+
+    test('no content:encoded at all: contentHtml is null, not empty-string',
+        () {
+      final feed = parseRssFeed('''
+<rss><channel><item>
+  <title>e</title>
+  <description>Just a description.</description>
+</item></channel></rss>
+''', 'u');
+      expect(feed.items.single.contentHtml, isNull);
+    });
+
+    test('content:encoded still fills contentHtml even when it is ALSO the '
+        'desc fallback (description absent)', () {
+      final feed = parseRssFeed('''
+<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item>
+  <content:encoded><![CDATA[Body text]]></content:encoded>
+</item></channel></rss>
+''', 'u');
+      final item = feed.items.single;
+      expect(item.desc, 'Body text');
+      expect(item.contentHtml, 'Body text');
+    });
+
+    test('itunes:summary fallback', () {
+      final feed = parseRssFeed('''
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><item>
+  <itunes:summary>Sum</itunes:summary>
+</item></channel></rss>
+''', 'u');
+      expect(feed.items.single.desc, 'Sum');
+    });
+
+    test('HTML-only entities in titles are decoded on top of XML decoding '
+        '(donor double-decode via textarea)', () {
+      final feed = parseRssFeed(
+          '<rss><channel><title>A &amp;mdash; B</title><item>'
+          '<title>Tom &amp; Jerry &#8212; go</title>'
+          '</item></channel></rss>',
+          'u');
+      expect(feed.title, 'A — B');
+      expect(feed.items.single.title, 'Tom & Jerry — go');
+    });
+
+    test('feed title falls back to the feed URL', () {
+      final feed = parseRssFeed(
+          '<rss><channel><item><title>e</title></item></channel></rss>',
+          'https://x.com/feed');
+      expect(feed.title, 'https://x.com/feed');
+    });
+  });
+
+  group('show notes (notesHtml)', () {
+    String rss(String body) => '''
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"
+  xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
+  <title>Show</title>
+  <item>
+    <title>Ep</title>
+    <enclosure url="https://cdn.x/ep.mp3" type="audio/mpeg"/>
+    $body
+  </item>
+</channel></rss>
+''';
+
+    test('keeps the raw description HTML, uncapped, tags and all', () {
+      final long = 'word ' * 120;
+      final feed = parseRssFeed(
+          rss('<description><![CDATA[<p>Intro <a href="https://x.com">link</a></p>'
+              '<p>$long</p>]]></description>'),
+          'https://x.com/feed');
+      final item = feed.items.single;
+      expect(item.notesHtml, contains('<a href="https://x.com">link</a>'));
+      expect(item.notesHtml!.length, greaterThan(600));
+      expect(item.desc.length, lessThanOrEqualTo(300),
+          reason: 'the row preview stays capped');
+    });
+
+    test('picks the longest body among content:encoded, description and '
+        'itunes:summary, measured as text', () {
+      final feed = parseRssFeed(
+          rss('<description>Short teaser</description>'
+              '<content:encoded><![CDATA[<p>The full notes, much longer than '
+              'the teaser is.</p>]]></content:encoded>'
+              '<itunes:summary>Medium summary text</itunes:summary>'),
+          'https://x.com/feed');
+      expect(feed.items.single.notesHtml,
+          '<p>The full notes, much longer than the teaser is.</p>');
+    });
+
+    test('markup padding does not make a body win', () {
+      final feed = parseRssFeed(
+          rss('<description><![CDATA[<img src="https://t.x/p.gif" width="1" '
+              'height="1"/><img src="https://t.x/q.gif" width="1" height="1"/>'
+              'Tiny]]></description>'
+              '<itunes:summary>A real summary of the episode</itunes:summary>'),
+          'https://x.com/feed');
+      expect(feed.items.single.notesHtml, 'A real summary of the episode');
+    });
+
+    test('entity-escaped description HTML comes back as markup', () {
+      final feed = parseRssFeed(
+          rss('<description>&lt;p&gt;Hello &amp;amp; welcome&lt;/p&gt;'
+              '</description>'),
+          'https://x.com/feed');
+      // Decoded once, by the XML: the &amp; left is the HTML's own.
+      expect(feed.items.single.notesHtml, '<p>Hello &amp; welcome</p>');
+    });
+
+    test('notes that show markup as text keep it as text', () {
+      final feed = parseRssFeed(
+          rss('<description><![CDATA[<p>Write &lt;b&gt; for bold</p>]]>'
+              '</description>'),
+          'https://x.com/feed');
+      expect(feed.items.single.notesHtml, '<p>Write &lt;b&gt; for bold</p>');
+    });
+
+    test('null, never empty, when the item has no body at all', () {
+      final feed = parseRssFeed(rss(''), 'https://x.com/feed');
+      expect(feed.items.single.notesHtml, isNull);
+    });
+
+    test('Atom: the longer of summary and content', () {
+      final feed = parseRssFeed('''
+<feed xmlns="http://www.w3.org/2005/Atom"><title>A</title>
+  <entry><title>E</title><summary>Short</summary>
+    <content type="html">&lt;p&gt;The longer body&lt;/p&gt;</content></entry>
+</feed>''', 'https://x.com/feed');
+      expect(feed.items.single.notesHtml, '<p>The longer body</p>');
+    });
+  });
+
+  group('enclosure selection (donor findAudio)', () {
+    test('standard RSS enclosure with audio type', () {
+      final feed = parseRssFeed(
+          '<rss><channel><item>'
+          '<enclosure url="https://x/e.mp3" type="audio/mpeg" length="1"/>'
+          '</item></channel></rss>',
+          'u');
+      expect(feed.items.single.audio, 'https://x/e.mp3');
+      expect(feed.items.single.enclosure!.type, 'audio/mpeg');
+    });
+
+    test('non-audio enclosure accepted when the URL looks like audio', () {
+      final feed = parseRssFeed(
+          '<rss><channel><item>'
+          '<enclosure url="https://x/e.mp3?tk=1"/>'
+          '</item></channel></rss>',
+          'u');
+      expect(feed.items.single.audio, 'https://x/e.mp3?tk=1');
+    });
+
+    test('image enclosure is skipped, Media-RSS content found instead', () {
+      final feed = parseRssFeed('''
+<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><item>
+  <enclosure url="https://x/cover.jpg" type="image/jpeg"/>
+  <media:group><media:content url="https://x/e.m4a" type="audio/mp4"/></media:group>
+</item></channel></rss>
+''', 'u');
+      expect(feed.items.single.audio, 'https://x/e.m4a');
+    });
+
+    test('Media-RSS medium="audio" without a MIME type', () {
+      final feed = parseRssFeed('''
+<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><item>
+  <media:content url="https://x/sound" medium="audio"/>
+</item></channel></rss>
+''', 'u');
+      expect(feed.items.single.audio, 'https://x/sound');
+    });
+  });
+
+  group('Atom', () {
+    const atom = '''
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>AF</title>
+  <entry>
+    <title>E1</title>
+    <link rel="alternate" href="https://x/1"/>
+    <link rel="enclosure" type="audio/mpeg" href="https://x/1.mp3"/>
+    <published>2024-01-01T00:00:00Z</published>
+    <summary>S</summary>
+  </entry>
+  <entry>
+    <title>E2</title>
+    <link href="https://x/2"/>
+    <updated>2024-02-02T00:00:00Z</updated>
+    <content>Full body here</content>
+  </entry>
+</feed>
+''';
+
+    test('entries parsed when there are no RSS items', () {
+      final feed = parseRssFeed(atom, 'u');
+      expect(feed.title, 'AF');
+      expect(feed.items, hasLength(2));
+      final e1 = feed.items[0];
+      expect(e1.title, 'E1');
+      expect(e1.link, 'https://x/1', reason: 'rel=alternate preferred');
+      expect(e1.date, '2024-01-01T00:00:00Z');
+      expect(e1.desc, 'S');
+      expect(e1.audio, 'https://x/1.mp3');
+      final e2 = feed.items[1];
+      expect(e2.link, 'https://x/2', reason: 'first link as fallback');
+      expect(e2.date, '2024-02-02T00:00:00Z', reason: 'updated fallback');
+      expect(e2.desc, 'Full body here', reason: 'content fallback');
+      expect(e2.audio, '');
+    });
+
+    test('Atom entries: contentHtml comes from <content>, independent of '
+        'summary (Campaign 9 Phase 4)', () {
+      final feed = parseRssFeed(atom, 'u');
+      expect(feed.items[0].contentHtml, isNull,
+          reason: 'only a <summary>, no <content> element at all');
+      expect(feed.items[1].contentHtml, 'Full body here');
+    });
+
+    test('RSS items win over Atom entries (donor: entries only when no items)',
+        () {
+      final feed = parseRssFeed(
+          '<rss><channel><item><title>R</title></item>'
+          '<entry><title>A</title></entry></channel></rss>',
+          'u');
+      expect(feed.items, hasLength(1));
+      expect(feed.items.single.title, 'R');
+    });
+  });
+
+  group('chapters (donor findChapters)', () {
+    test('inline psc:chapters with timestamp parsing', () {
+      final feed = parseRssFeed('''
+<rss xmlns:psc="http://podlove.org/simple-chapters"><channel><item>
+  <title>C</title>
+  <psc:chapters>
+    <psc:chapter start="1:02:03.5" title="Intro" href="h" image="i"/>
+    <psc:chapter start="02:30" title="Two"/>
+    <psc:chapter start="90" title="Sec"/>
+    <psc:chapter start="abc" title="Bad"/>
+  </psc:chapters>
+</item></channel></rss>
+''', 'u');
+      final chs = feed.items.single.chapters!;
+      expect(chs, hasLength(4));
+      expect(chs[0].start, 3723.5);
+      expect(chs[0].title, 'Intro');
+      expect(chs[0].href, 'h');
+      expect(chs[0].image, 'i');
+      expect(chs[1].start, 150.0);
+      expect(chs[2].start, 90.0);
+      expect(chs[3].start, 0.0,
+          reason: 'donor: Number("abc")||0 for single-part timestamps');
+      expect(feed.items.single.chaptersUrl, isNull);
+    });
+
+    test('multi-part unparseable timestamp propagates NaN (donor quirk)', () {
+      final feed = parseRssFeed('''
+<rss xmlns:psc="http://podlove.org/simple-chapters"><channel><item>
+  <psc:chapters><psc:chapter start="ab:cd" title="N"/></psc:chapters>
+</item></channel></rss>
+''', 'u');
+      expect(feed.items.single.chapters!.single.start.isNaN, isTrue);
+    });
+
+    test('podcast:chapters url form yields chaptersUrl', () {
+      final feed = parseRssFeed('''
+<rss xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><item>
+  <podcast:chapters url="https://x/ch.json" type="application/json+chapters"/>
+</item></channel></rss>
+''', 'u');
+      expect(feed.items.single.chapters, isNull);
+      expect(feed.items.single.chaptersUrl, 'https://x/ch.json');
+    });
+
+    test('non-direct-child chapters wrappers are ignored', () {
+      final feed = parseRssFeed('''
+<rss xmlns:psc="http://podlove.org/simple-chapters"><channel><item>
+  <extra><psc:chapters><psc:chapter start="5" title="X"/></psc:chapters></extra>
+</item></channel></rss>
+''', 'u');
+      expect(feed.items.single.chapters, isNull);
+      expect(feed.items.single.chaptersUrl, isNull);
+    });
+  });
+
+  group('RFC 5005 paged-feed links', () {
+    test('rel=next at channel level is captured', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <atom:link rel="next" href="https://x.test/feed?page=2"/>
+  <item><title>e</title></item>
+</channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.nextPageUrl, 'https://x.test/feed?page=2');
+      expect(feed.nextPageRel, 'next');
+    });
+
+    test('rel=prev-archive is used when rel=next is absent', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <atom:link rel="prev-archive" href="https://x.test/feed?page=old"/>
+</channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.nextPageUrl, 'https://x.test/feed?page=old');
+      expect(feed.nextPageRel, 'prev-archive');
+    });
+
+    test('rel=next wins over a rel=prev-archive on the same channel', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <atom:link rel="prev-archive" href="https://x.test/feed?page=old"/>
+  <atom:link rel="next" href="https://x.test/feed?page=2"/>
+</channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.nextPageUrl, 'https://x.test/feed?page=2');
+      expect(feed.nextPageRel, 'next');
+    });
+
+    test('neither link present yields null/null', () {
+      final feed =
+          parseRssFeed('<rss><channel><title>t</title></channel></rss>', 'u');
+      expect(feed.nextPageUrl, isNull);
+      expect(feed.nextPageRel, isNull);
+    });
+
+    test('multiple unrelated link rels ignored (self/alternate), next found '
+        'among them', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <atom:link rel="self" href="https://x.test/feed"/>
+  <atom:link rel="alternate" href="https://x.test/"/>
+  <atom:link rel="next" href="https://x.test/feed?page=2"/>
+</channel></rss>
+''', 'u');
+      expect(feed.nextPageUrl, 'https://x.test/feed?page=2');
+    });
+
+    test('garbage: rel=next with no href is ignored, not a crash', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <atom:link rel="next"/>
+</channel></rss>
+''', 'u');
+      expect(feed.nextPageUrl, isNull);
+    });
+
+    test('garbage: rel=next with an empty href falls through to '
+        'prev-archive', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <atom:link rel="next" href=""/>
+  <atom:link rel="prev-archive" href="https://x.test/feed?page=old"/>
+</channel></rss>
+''', 'u');
+      expect(feed.nextPageUrl, 'https://x.test/feed?page=old');
+      expect(feed.nextPageRel, 'prev-archive');
+    });
+
+    test('an item-level rel=next link does not leak to the feed level', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <item>
+    <title>e</title>
+    <atom:link rel="next" href="https://x.test/not-a-feed-page"/>
+  </item>
+</channel></rss>
+''', 'u');
+      expect(feed.nextPageUrl, isNull);
+    });
+
+    test('Atom feed root (no separate channel element) is supported', () {
+      final feed = parseRssFeed('''
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>AF</title>
+  <link rel="next" href="https://x.test/feed?page=2"/>
+  <entry><title>E1</title></entry>
+</feed>
+''', 'u');
+      expect(feed.nextPageUrl, 'https://x.test/feed?page=2');
+      expect(feed.nextPageRel, 'next');
+    });
+
+    test('a relative href is resolved against the feed URL', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <atom:link rel="next" href="/feed?page=2"/>
+</channel></rss>
+''', 'https://x.test/podcast/feed');
+      expect(feed.nextPageUrl, 'https://x.test/feed?page=2');
+    });
+
+    test('a query-only relative href resolves against the feed URL', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <atom:link rel="next" href="?paged=2"/>
+</channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.nextPageUrl, 'https://x.test/feed?paged=2');
+    });
+  });
+
+  group('channel language', () {
+    test('the channel <language> is read as declared', () {
+      final feed = parseRssFeed('''
+<rss><channel><title>t</title><language> ru-RU </language></channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.language, 'ru-RU');
+    });
+
+    test('no <language> (or an empty one) reads as null', () {
+      expect(
+          parseRssFeed('<rss><channel><title>t</title></channel></rss>',
+                  'https://x.test/feed')
+              .language,
+          isNull);
+      expect(
+          parseRssFeed(
+                  '<rss><channel><title>t</title><language/></channel></rss>',
+                  'https://x.test/feed')
+              .language,
+          isNull);
+    });
+
+    test('an item-level language never leaks into the channel', () {
+      final feed = parseRssFeed('''
+<rss><channel><title>t</title>
+  <item><title>i</title><language>de</language></item>
+</channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.language, isNull);
+    });
+  });
+
+  group('channel artwork (P6 river faces)', () {
+    test('itunes:image href is read as the feed image', () {
+      final feed = parseRssFeed('''
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
+  <title>t</title>
+  <itunes:image href="https://x.test/art.jpg"/>
+</channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.imageUrl, 'https://x.test/art.jpg');
+    });
+
+    test('RSS <image><url> is read when there is no itunes:image', () {
+      final feed = parseRssFeed('''
+<rss><channel>
+  <title>t</title>
+  <image><url>https://x.test/rss-art.jpg</url><title>t</title></image>
+</channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.imageUrl, 'https://x.test/rss-art.jpg');
+    });
+
+    test('itunes:image takes priority when both are present', () {
+      final feed = parseRssFeed('''
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
+  <title>t</title>
+  <image><url>https://x.test/rss-art.jpg</url></image>
+  <itunes:image href="https://x.test/itunes-art.jpg"/>
+</channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.imageUrl, 'https://x.test/itunes-art.jpg');
+    });
+
+    test('no artwork at all reads as null, not an error', () {
+      final feed = parseRssFeed('''
+<rss><channel><title>t</title></channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.imageUrl, isNull);
+    });
+
+    test('a relative itunes:image href resolves against the feed URL', () {
+      final feed = parseRssFeed('''
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
+  <title>t</title>
+  <itunes:image href="/art.jpg"/>
+</channel></rss>
+''', 'https://x.test/podcast/feed');
+      expect(feed.imageUrl, 'https://x.test/art.jpg');
+    });
+
+    test('an item-level image never leaks into the channel image', () {
+      final feed = parseRssFeed('''
+<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel>
+  <title>t</title>
+  <item>
+    <title>e</title>
+    <itunes:image href="https://x.test/episode-art.jpg"/>
+  </item>
+</channel></rss>
+''', 'https://x.test/feed');
+      expect(feed.imageUrl, isNull);
+    });
+  });
+
+  group('guards', () {
+    test('invalid XML throws the donor message', () {
+      expect(
+          () => parseRssFeed('this is not xml <', 'u'),
+          throwsA(isA<FeedParseException>().having((e) => e.message, 'message',
+              contains('Not valid XML'))));
+    });
+
+    test('a feed far above the old 8 MB cap parses every item', () {
+      // Real feeds run past 8 MB (Bankless ~21 MB, 1,351 episodes); the old
+      // whole-document parse refused them outright.
+      final body = 'word ' * 2000;
+      const n = 1000;
+      final xml = StringBuffer(
+          '<rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">'
+          '<channel><title>Big</title>'
+          '<itunes:image href="https://ex.com/show.jpg"/>');
+      for (var i = 0; i < n; i++) {
+        xml.write('<item><title>Ep $i</title>'
+            '<itunes:image href="https://ex.com/ep$i.jpg"/>'
+            '<pubDate>Mon, 0${1 + i % 9} Jan 2024 00:00:00 GMT</pubDate>'
+            '<description><![CDATA[$body]]></description>'
+            '<enclosure url="https://ex.com/$i.mp3" type="audio/mpeg"/>'
+            '</item>');
+      }
+      xml.write('</channel></rss>');
+      final s = xml.toString();
+      expect(s.length, greaterThan(8 * 1024 * 1024));
+
+      final f = parseRssFeed(s, 'https://ex.com/feed');
+      expect(f.title, 'Big');
+      expect(f.imageUrl, 'https://ex.com/show.jpg');
+      expect(f.items, hasLength(n));
+      expect(f.items.last.title, 'Ep ${n - 1}');
+      expect(f.items.last.enclosure?.url, 'https://ex.com/${n - 1}.mp3');
+    });
+
+    test('oversized input refuses to parse (M19)', () {
+      final big = 'x' * (maxFeedXmlBytes + 1);
+      expect(
+          () => parseRssFeed(big, 'u'),
+          throwsA(isA<FeedParseException>().having((e) => e.message, 'message',
+              contains('too large to parse safely'))));
+    });
+  });
+
+  group('decodeHtmlEntities', () {
+    test('named, numeric and hex references', () {
+      expect(decodeHtmlEntities('&amp;'), '&');
+      expect(decodeHtmlEntities('&lt;b&gt;'), '<b>');
+      expect(decodeHtmlEntities('&#233;'), 'é');
+      expect(decodeHtmlEntities('&#x1F600;'), '😀');
+      expect(decodeHtmlEntities('&mdash;&nbsp;&rsquo;'), '— ’');
+    });
+
+    test('unknown references stay literal', () {
+      expect(decodeHtmlEntities('&notarealentity;'), '&notarealentity;');
+    });
+
+    test('references without a trailing semicolon stay literal '
+        '(deviation: the donor textarea decoded a legacy subset)', () {
+      expect(decodeHtmlEntities('&amp x'), '&amp x');
+    });
+
+    test('empty and null-ish input', () {
+      expect(decodeHtmlEntities(''), '');
+      expect(decodeHtmlEntities('no entities'), 'no entities');
+    });
+  });
+
+  group('episode artwork and length', () {
+    const ns = 'xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"';
+
+    FeedItem only(String item, {String url = 'https://x.test/feed'}) =>
+        parseRssFeed('<rss $ns><channel><title>t</title>$item</channel></rss>',
+                url)
+            .items
+            .single;
+
+    test('an item\'s own itunes:image is its artwork', () {
+      final it = only('<item><title>e</title>'
+          '<itunes:image href="https://x.test/ep1.jpg"/></item>');
+      expect(it.imageUrl, 'https://x.test/ep1.jpg');
+    });
+
+    test('a relative item image resolves against the feed URL', () {
+      final it = only(
+          '<item><title>e</title><itunes:image href="/ep1.jpg"/></item>',
+          url: 'https://x.test/podcast/feed');
+      expect(it.imageUrl, 'https://x.test/ep1.jpg');
+    });
+
+    test('an item with no image of its own has none', () {
+      expect(only('<item><title>e</title></item>').imageUrl, isNull);
+    });
+
+    test('itunes:duration reads seconds, mm:ss and hh:mm:ss', () {
+      int? dur(String v) =>
+          only('<item><title>e</title><itunes:duration>$v</itunes:duration>'
+                  '</item>')
+              .durationMs;
+      expect(dur('1800'), 1800000);
+      expect(dur('45:30'), (45 * 60 + 30) * 1000);
+      expect(dur('1:02:03'), (3600 + 2 * 60 + 3) * 1000);
+      expect(dur(' 90 '), 90000);
+    });
+
+    test('a missing, zero or garbled duration is unknown, not zero', () {
+      int? dur(String v) =>
+          only('<item><title>e</title><itunes:duration>$v</itunes:duration>'
+                  '</item>')
+              .durationMs;
+      expect(only('<item><title>e</title></item>').durationMs, isNull);
+      expect(dur('0'), isNull);
+      expect(dur('soon'), isNull);
+      expect(dur('1:xx'), isNull);
+    });
+  });
+
+  group('item identity', () {
+    test('an RSS item keeps its own <guid>, trimmed', () {
+      final feed = parseRssFeed('''
+<rss version="2.0"><channel><title>t</title>
+  <item>
+    <title>One</title>
+    <link>https://show.test/</link>
+    <guid isPermaLink="false">  show-ep-1  </guid>
+  </item>
+  <item><title>Two</title><link>https://show.test/</link></item>
+</channel></rss>
+''', 'https://show.test/feed');
+      expect(feed.items.map((i) => i.guid), ['show-ep-1', '']);
+    });
+
+    test('an Atom entry keeps its <id> as its guid', () {
+      final feed = parseRssFeed('''
+<feed xmlns="http://www.w3.org/2005/Atom"><title>t</title>
+  <entry><title>One</title><id>urn:uuid:1</id>
+    <link rel="alternate" href="https://show.test/"/></entry>
+</feed>
+''', 'https://show.test/feed');
+      expect(feed.items.single.guid, 'urn:uuid:1');
+    });
+  });
+}

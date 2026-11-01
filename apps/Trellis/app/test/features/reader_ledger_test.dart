@@ -1,0 +1,186 @@
+import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:trellis/db/database.dart';
+import 'package:trellis/main.dart';
+
+import '../support/pick_reader.dart';
+import '../support/tabs.dart';
+import '../support/open_work.dart';
+
+/// The word ledger's UI half (the schema half is ledger_db_test): a
+/// long-press on any word sets it aside via the ONE dao path, cleaned of
+/// surrounding punctuation; the ledger screen off the reader app bar
+/// lists and removes. The collection is the user's hand (ADR-0003 law 2),
+/// so every add is calm and idempotent — no counter, no streak, just a
+/// snackbar naming what was kept. Since Campaign 4 Phase 3, scroll mode
+/// and RSVP route that long-press through the definition sheet first
+/// (dictionary_sheet_test.dart covers the sheet itself); the reader's own
+/// long-press is untouched, still direct.
+void main() {
+  late AppDatabase db;
+  setUp(() => db = AppDatabase.forTesting(NativeDatabase.memory()));
+  tearDown(() => db.close());
+
+  Future<(int, int)> seed(String text, {String title = 'Five Words'}) async {
+    final profileId = await db.profilesDao.create('Ada');
+    final workId = await db.spineDao.insertWork(
+        profileId: profileId,
+        kind: 'note',
+        title: title,
+        persistence: 'work',
+        firstSeenEpochDay: 100,
+        lang: 'en');
+    await db.spineDao
+        .insertSegments(workId, [(idx: 0, kind: 'prose', text: text)]);
+    return (profileId, workId);
+  }
+
+  Future<void> openReader(WidgetTester tester,
+      {String title = 'Five Words'}) async {
+    await tester.pumpWidget(TrellisApp(db: db));
+    await tester.pumpAndSettle();
+    await pickReader(tester, 'Ada');
+    await toTab(tester, 'Library');
+    await openToRead(tester, title);
+  }
+
+  testWidgets(
+      'long-press on a scroll-mode word opens the definition sheet; its '
+      'own keep button adds the word, cleaned, with a calm snackbar; '
+      'doing that twice stays idempotent (Campaign 4 Phase 3: the sheet '
+      'absorbs the keep gesture rather than stacking a second long-press)',
+      (tester) async {
+    final (profileId, workId) = await seed('One two three four five.');
+    await openReader(tester);
+
+    // Campaign 9 Phase 6: `mode-toggle` opens a labeled three-way picker
+    // rather than cycling on its own tap.
+    await tester.tap(find.byKey(const Key('mode-toggle')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('mode-item-page')));
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.text('five.'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('dictionary-sheet')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('definition-sheet-keep')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('“five” is in your word ledger.'), findsOneWidget);
+    var rows = await db.ledgerDao.wordsOf(profileId);
+    expect(rows.single.word, 'five', reason: 'edge punctuation stripped');
+    expect(rows.single.lang, 'en');
+    expect(rows.single.sourceWorkId, workId);
+
+    await tester.longPress(find.text('five.'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('definition-sheet-keep')));
+    await tester.pumpAndSettle();
+    rows = await db.ledgerDao.wordsOf(profileId);
+    expect(rows, hasLength(1), reason: 'the dao dedupe is the only path');
+  });
+
+  testWidgets(
+      'long-press on the RSVP word opens the sheet; its keep button sets '
+      'the word under the cursor', (tester) async {
+    final (profileId, _) = await seed('One two three four five.');
+    await openReader(tester);
+
+    // Step to 'two', then hold the word zone.
+    final rect = tester.getRect(find.byKey(const Key('reader-tapzone')));
+    await tester
+        .tapAt(Offset(rect.left + rect.width * 5 / 6, rect.center.dy));
+    await tester.pump();
+    await tester.longPress(find.byKey(const Key('reader-tapzone')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('dictionary-sheet')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('definition-sheet-keep')));
+    await tester.pumpAndSettle();
+
+    final rows = await db.ledgerDao.wordsOf(profileId);
+    expect(rows.single.word, 'two');
+    expect(find.text('“two” is in your word ledger.'), findsOneWidget);
+  });
+
+  testWidgets('the app bar opens the ledger; removal is a button away',
+      (tester) async {
+    final (profileId, _) = await seed('One two three four five.');
+    final saudadeId = await db.ledgerDao
+        .add(profileId: profileId, word: 'saudade', lang: 'pt', nowMs: 1000);
+    final hyggeId = await db.ledgerDao
+        .add(profileId: profileId, word: 'hygge', lang: 'da', nowMs: 2000);
+    await openReader(tester);
+
+    await tester.tap(find.byKey(const Key('reader-overflow')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('open-ledger')));
+    await tester.pumpAndSettle();
+    expect(find.text('hygge'), findsOneWidget, reason: 'newest first');
+    expect(find.text('saudade'), findsOneWidget);
+
+    // The Remove button is deliberate: no dialog, a lasting Undo.
+    await tester.tap(find.byKey(Key('ledger-remove-$hyggeId')));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('hygge'), findsNothing);
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    expect(find.text('hygge'), findsOneWidget);
+    await tester.tap(find.byKey(Key('ledger-remove-$hyggeId')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Dismiss'));
+    await tester.pumpAndSettle();
+    expect((await db.ledgerDao.wordsOf(profileId)).single.word, 'saudade');
+
+    // A swipe is an easy gesture, so it asks first, naming the act.
+    await tester.drag(
+        find.byKey(Key('ledger-row-$saudadeId')), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsOneWidget);
+    await tester.tap(find.text('Keep'));
+    await tester.pumpAndSettle();
+    expect(find.text('saudade'), findsOneWidget);
+    await tester.drag(
+        find.byKey(Key('ledger-row-$saudadeId')), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text("Remove 'saudade'"));
+    await tester.pumpAndSettle();
+    expect(await db.ledgerDao.wordsOf(profileId), isEmpty);
+    expect(find.text('Nothing set aside yet.'), findsOneWidget,
+        reason: 'the empty state is an invitation, not a void');
+  });
+
+
+  testWidgets(
+      'a held word becomes a cloze card in its own sentence: the sheet’s '
+      'Make a card opens the editor with the word hidden, and saving puts '
+      'it in My cards', (tester) async {
+    final (profileId, _) =
+        await seed('It rained all day. One two three four five.');
+    await openReader(tester);
+    await tester.tap(find.byKey(const Key('mode-toggle')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('mode-item-page')));
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.text('four'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('definition-sheet-card')));
+    await tester.pumpAndSettle();
+
+    final text = tester
+        .widget<TextField>(find.byKey(const Key('card-cloze-text')))
+        .controller!
+        .text;
+    expect(text, 'One two three {{c1::four}} five.',
+        reason: 'the sentence the word is in, not the whole passage');
+    await tester.tap(find.byKey(const Key('card-save')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Saved to My cards.'), findsOneWidget);
+    final rows = await db.studyDao.coursesOf(profileId);
+    expect(rows.single.courseId, 'my-cards');
+    expect(rows.single.raw, contains('One two three {{c1::four}} five.'));
+  });
+}

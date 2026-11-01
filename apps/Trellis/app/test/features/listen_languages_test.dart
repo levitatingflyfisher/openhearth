@@ -1,0 +1,248 @@
+import 'dart:io';
+
+import 'package:drift/drift.dart' show Value;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:ml_runtime/ml_runtime.dart';
+import 'package:trellis/db/database.dart';
+import 'package:trellis/features/listen/listen_chain.dart';
+import 'package:trellis/features/listen/listen_device.dart';
+import 'package:trellis/features/reader/speech/phone_voice.dart';
+import 'package:trellis/features/reader/translation/language_names.dart';
+import 'package:trellis/features/transcribe/transcribe_coordinator.dart';
+
+import '../support/fake_services.dart';
+
+/// Which languages the one tap offers for an episode (owner: "any
+/// language we have translation for will have the one click"): those the
+/// downloaded voices can save AND a translator reaches from the episode's
+/// own language, directly or by way of English. Where there is none, the
+/// list is empty and the page shows no button.
+void main() {
+  late Directory dir;
+
+  setUp(() => dir = Directory.systemTemp.createTempSync('trellis-listen-l'));
+  tearDown(() => dir.deleteSync(recursive: true));
+
+  List<String> offered(String? workLang, {String? feedLang}) =>
+      listenLanguagesFor(testServices(dir),
+          workLang: workLang, feedLang: feedLang);
+
+  test('Trellis’s own voices can save German, English, Spanish, French, '
+      'Italian, Dutch, Portuguese and Chinese', () {
+    expect(savableListenLanguages(testServices(dir)),
+        ['de', 'en', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'zh']);
+  });
+
+  test('with the phone’s own voices, every language the phone speaks can '
+      'be saved too', () {
+    expect(
+        savableListenLanguages(
+            testServices(dir, phoneVoices: phoneVoicesFor(['ru', 'de', 'ja']))),
+        ['de', 'en', 'es', 'fr', 'it', 'ja', 'nl', 'pt', 'ru', 'zh']);
+  });
+
+  test('an English episode: every other language the voices speak, each '
+      'by its own pair', () {
+    expect(offered('en'), ['de', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'zh']);
+    expect(offered('en-US'), ['de', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'zh']);
+  });
+
+  test('a Spanish episode: into English directly, into the others by way '
+      'of English, and never into Spanish', () {
+    expect(offered('es'), ['de', 'en', 'fr', 'it', 'nl', 'pt', 'ru', 'zh']);
+  });
+
+  test('an episode in a language no voice speaks is still offered every '
+      'language a translator reaches from it', () {
+    const all = ['de', 'en', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'zh'];
+    expect(offered('ja'), all);
+    // Russian has its own voice since 1.6.20; it is never offered itself.
+    expect(offered('ru'), [for (final l in all) if (l != 'ru') l]);
+  });
+
+  test('an episode in a language no translator reads is offered nothing',
+      () {
+    expect(offered('cy'), isEmpty);
+  });
+
+  test('the show’s language stands in when the episode has none of its '
+      'own', () {
+    expect(offered(null, feedLang: 'fr-FR'),
+        ['de', 'en', 'es', 'it', 'nl', 'pt', 'ru', 'zh']);
+    expect(offered('es', feedLang: 'fr'),
+        ['de', 'en', 'fr', 'it', 'nl', 'pt', 'ru', 'zh']);
+  });
+
+  test('a language nobody knows is taken for English, as the chain takes '
+      'it', () {
+    const fromEnglish = ['de', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'zh'];
+    expect(offered(null), fromEnglish);
+    expect(offered('und', feedLang: ''), fromEnglish);
+    expect(listenSourceLanguage(workLang: null, feedLang: null), 'en');
+    expect(listenSourceLanguage(workLang: null, feedLang: 'pt-BR'), 'pt');
+  });
+
+  test('a device that cannot translate is offered nothing', () {
+    expect(
+        listenLanguagesFor(testServices(dir, localMlAvailable: false),
+            workLang: 'en', feedLang: null),
+        isEmpty);
+  });
+
+  test('what it would download is counted from the show’s language when '
+      'the episode has none: a French show into Spanish needs both '
+      'translators', () async {
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(db.close);
+    final profileId = await db.profilesDao.create('Ada');
+    final feedId = await db.feedsDao.insertFeed(
+        profileId: profileId, url: 'https://cast.test/feed', title: 'Show');
+    await (db.update(db.feeds)..where((f) => f.id.equals(feedId)))
+        .write(const FeedsCompanion(language: Value('fr')));
+    final id = await db.spineDao.insertWork(
+        profileId: profileId,
+        kind: 'episode',
+        title: 'Épisode',
+        persistence: 'ephemeron',
+        firstSeenEpochDay: 100,
+        sourceUrl: 'https://cast.test/1.mp3');
+    await db.feedsDao.insertEpisode(
+        workId: id,
+        feedId: feedId,
+        guid: 'g1',
+        enclosureUrl: 'https://cast.test/1.mp3',
+        publishedAtMs: 5000);
+    final services = testServices(dir);
+
+    final items = await listenDownloads(
+        db: db,
+        services: services,
+        transcriber: TranscribeCoordinator(db: db, services: services),
+        work: (await db.spineDao.workById(id))!,
+        episode: (await db.feedsDao.episodeOf(id))!,
+        lang: 'es');
+
+    final labels = [for (final i in items) i.label];
+    expect(labels.where((l) => l.startsWith('French to English translator')),
+        hasLength(1));
+    expect(labels.where((l) => l.startsWith('English to Spanish translator')),
+        hasLength(1));
+  });
+
+  group('the phone’s own voices (board-0126: “russian, japanese, german, '
+      'not just spanish”)', () {
+    /// The starter catalog without its English to Japanese pair.
+    ModelRegistry withoutEnglishToJapanese() => ModelRegistry([
+          for (final s in ModelRegistry.starter().specs)
+            if (s.id != 'elanmt-bt-en-ja') s,
+        ]);
+
+    List<String> offeredWith(Iterable<String> phone, String? workLang,
+            {ModelRegistry? registry, String? feedLang}) =>
+        listenLanguagesFor(
+            testServices(dir,
+                phoneVoices: phoneVoicesFor(phone), registry: registry),
+            workLang: workLang,
+            feedLang: feedLang);
+
+    test('an English episode on a phone with Russian, German and Japanese '
+        'voices: all three are offered beside Trellis’s own', () {
+      expect(offeredWith(['ru', 'de', 'ja'], 'en'),
+          ['de', 'es', 'fr', 'it', 'ja', 'nl', 'pt', 'ru', 'zh']);
+    });
+
+    test('without the English to Japanese translator, Japanese is not '
+        'offered', () {
+      expect(
+          offeredWith(['ru', 'de', 'ja'], 'en',
+              registry: withoutEnglishToJapanese()),
+          ['de', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'zh']);
+    });
+
+    // One for each language a translator writes from English: offered
+    // exactly when the phone (or Trellis's own voice) can save it.
+    const fromEnglish = [
+      'ar', 'de', 'es', 'fr', 'hi', 'it', 'ja', 'nl', 'pt', 'ru', 'uk', //
+      'zh',
+    ];
+    for (final lang in fromEnglish) {
+      test('${languageDisplayName(lang)}: offered for an English episode '
+          'with a phone voice for it', () {
+        expect(offeredWith([lang], 'en'), contains(lang));
+      });
+      test('${languageDisplayName(lang)}: '
+          '${ownVoiceLangsForTest.contains(lang) ? 'offered without a phone voice, by Trellis’s own voice' : 'not offered without a phone voice'}',
+          () {
+        expect(offeredWith(const [], 'en').contains(lang),
+            ownVoiceLangsForTest.contains(lang));
+      });
+    }
+
+    test('a Russian episode reaches German by way of English, and English '
+        'itself', () {
+      expect(offeredWith(['de', 'en'], 'ru'),
+          ['de', 'en', 'es', 'fr', 'it', 'nl', 'pt', 'zh']);
+    });
+
+    test('a phone voice for a language no translator knows at all is never '
+        'offered', () {
+      expect(offeredWith(['cy', 'bo'], 'en'),
+          ['de', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'zh']);
+    });
+
+    test('a language with a translator and no voice is left out, and the '
+        'note names it and says where to add a voice', () {
+      // Japanese has a translator and no voice of Trellis's own (Russian
+      // was the example until its own voice shipped, 1.6.20).
+      final services = testServices(dir, phoneVoices: phoneVoicesFor(['hi']));
+      final sorted = listenLanguagesOf(services, workLang: 'en', feedLang: null);
+      expect(sorted.offered, isNot(contains('ja')));
+      expect(sorted.noVoice, contains('ja'));
+      final note =
+          listenMissingNoteFor(services, workLang: 'en', feedLang: null)!;
+      expect(note, contains('Japanese'));
+      expect(note, contains('no voice on this phone'));
+      expect(note, contains('Text-to-speech output'));
+      expect(note, isNot(contains('Hindi')));
+    });
+
+    test('a language the phone speaks and no translator writes from the '
+        'episode’s language is named with that reason', () {
+      final services =
+          testServices(dir, phoneVoices: phoneVoicesFor(['ko', 'ru']));
+      expect(
+          listenLanguagesOf(services, workLang: 'en', feedLang: null)
+              .noTranslator,
+          ['ko']);
+      final note =
+          listenMissingNoteFor(services, workLang: 'en', feedLang: null)!;
+      expect(note, contains('Korean'));
+      expect(note, contains('no translator from English'));
+    });
+
+    test('the voices are those last heard from the phone, and a voice '
+        'installed since shows up when they are asked again', () async {
+      final saver = FakePhoneSpeechSaver(['hi']);
+      final cache = PhoneVoiceCache(saver);
+      final services = testServices(dir, phoneVoices: cache);
+      List<String> offered() =>
+          listenLanguagesFor(services, workLang: 'en', feedLang: null);
+      const own = ['de', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'zh'];
+      expect(offered(), own, reason: 'not asked yet');
+      var heard = 0;
+      cache.addListener(() => heard++);
+      await cache.refresh();
+      expect(offered(), [...own, 'hi']..sort());
+      saver.langs = {'hi', 'ja'};
+      await cache.refresh();
+      expect(offered(), [...own, 'hi', 'ja']..sort());
+      await cache.refresh();
+      expect(heard, 2, reason: 'only a real change is told');
+    });
+  });
+}
+
+/// The languages Trellis's own voices speak (ADR-0022): the registry's
+/// `voiceLangs`, written out so a change to it shows here.
+const ownVoiceLangsForTest = {'de', 'en', 'es', 'fr', 'it', 'nl', 'pt', 'ru', 'zh'};

@@ -1,0 +1,195 @@
+import 'dart:async';
+
+import 'package:drift/native.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:trellis/db/database.dart';
+import 'package:trellis/features/feeds/background/feed_check_settings.dart';
+
+class FakeScheduler implements FeedCheckScheduler {
+  FakeScheduler({this.available = true});
+  @override
+  final bool available;
+  final List<String> calls = [];
+
+  /// False while Android runs the app with no screen: the scheduler's
+  /// channel lives on the activity.
+  bool attached = true;
+
+  @override
+  Future<void> schedulePeriodic(FeedCheckConstraints constraints,
+      {required bool replace}) async {
+    if (!attached) throw MissingPluginException('schedulePeriodic');
+    calls.add('schedule unmetered=${constraints.unmeteredOnly} '
+        'replace=$replace');
+  }
+  @override
+  Future<void> cancelPeriodic() async => calls.add('cancel');
+  @override
+  Future<void> requestAutoDownload() async => calls.add('auto-download');
+  @override
+  Future<void> requestMakeAhead() async => calls.add('make-ahead');
+  @override
+  Future<void> cancelAutoDownload() async => calls.add('cancel-auto');
+}
+
+class _Meter implements NetworkMeter {
+  _Meter(this.answer);
+  final bool Function() answer;
+  @override
+  Future<bool> isMetered() async => answer();
+}
+
+void main() {
+  late AppDatabase db;
+  setUp(() => db = AppDatabase.forTesting(NativeDatabase.memory()));
+  tearDown(() => db.close());
+
+  test('the constraints: Wi-Fi only maps to unmetered; battery-low always '
+      'waits; charging never matters', () {
+    final wifi = constraintsFor(wifiOnly: true);
+    final any = constraintsFor(wifiOnly: false);
+    expect(wifi.unmeteredOnly, isTrue);
+    expect(any.unmeteredOnly, isFalse);
+    for (final c in [wifi, any]) {
+      expect(c.batteryNotLow, isTrue);
+      expect(c.charging, isFalse);
+    }
+    expect(feedCheckEvery, const Duration(hours: 4));
+  });
+
+  test('both switches default on, and launch keeps the existing schedule',
+      () async {
+    final s = FakeScheduler();
+    final settings = FeedCheckSettings(db, s);
+    await settings.applyAtLaunch();
+    expect(settings.background, isTrue);
+    expect(settings.wifiOnly, isTrue);
+    expect(s.calls, ['schedule unmetered=true replace=false']);
+  });
+
+  // Seen on the emulator: a start with no screen (media resumption after
+  // a boot) ran applyAtLaunch and schedulePeriodic failed with
+  // MissingPluginException. It waits for the app to open instead.
+  test('a launch with no screen schedules once the app opens, without an '
+      'error', () async {
+    final s = FakeScheduler()..attached = false;
+    final opened = StreamController<void>.broadcast();
+    final settings = FeedCheckSettings(db, s,
+        hostResumed: () => opened.stream.first);
+    Object? failed;
+    var done = false;
+    unawaited(settings.applyAtLaunch().then((_) => done = true,
+        onError: (Object e) => failed = e));
+    await pumpEventQueue();
+    expect(failed, isNull);
+    expect(done, isFalse);
+    expect(s.calls, isEmpty);
+
+    s.attached = true;
+    opened.add(null);
+    await pumpEventQueue();
+    expect(failed, isNull);
+    expect(done, isTrue);
+    expect(s.calls, ['schedule unmetered=true replace=false']);
+  });
+
+  test('turning background checks off cancels the work, and launch keeps '
+      'it cancelled', () async {
+    final s = FakeScheduler();
+    final settings = FeedCheckSettings(db, s);
+    await settings.load();
+    await settings.setBackground(false);
+    expect(s.calls, ['cancel', 'cancel-auto'],
+        reason: 'a pass waiting for Wi-Fi goes too');
+
+    final next = FakeScheduler();
+    await FeedCheckSettings(db, next).applyAtLaunch();
+    expect(next.calls, ['cancel', 'cancel-auto']);
+  });
+
+  test('turning it back on schedules again', () async {
+    final s = FakeScheduler();
+    final settings = FeedCheckSettings(db, s);
+    await settings.setBackground(false);
+    await settings.setBackground(true);
+    expect(s.calls.last, 'schedule unmetered=true replace=false');
+  });
+
+  test('changing Wi-Fi only swaps the constraints in; while checks are off '
+      'it only remembers', () async {
+    final s = FakeScheduler();
+    final settings = FeedCheckSettings(db, s);
+    await settings.load();
+    await settings.setWifiOnly(false);
+    expect(s.calls, ['schedule unmetered=false replace=true']);
+
+    await settings.setBackground(false);
+    s.calls.clear();
+    await settings.setWifiOnly(true);
+    expect(s.calls, isEmpty);
+    await settings.load();
+    expect(settings.wifiOnly, isTrue);
+  });
+
+  test('Download only on Wi-Fi is off until chosen, is remembered, and asks '
+      'the scheduler nothing (1.6.0)', () async {
+    final s = FakeScheduler();
+    final settings = FeedCheckSettings(db, s);
+    await settings.load();
+    expect(settings.downloadsWifiOnly, isFalse,
+        reason: 'a tapped download starts at once until the listener says '
+            'otherwise, as it always has');
+    expect(await FeedCheckSettings.downloadsWifiOnlyOn(db), isFalse);
+
+    await settings.setDownloadsWifiOnly(true);
+
+    expect(await FeedCheckSettings.downloadsWifiOnlyOn(db), isTrue);
+    final again = FeedCheckSettings(db, FakeScheduler());
+    await again.load();
+    expect(again.downloadsWifiOnly, isTrue);
+    expect(s.calls, isEmpty);
+  });
+
+  test('a download by hand must wait only with the switch on AND a metered '
+      'network; with it off the network is not even asked (1.6.0)', () async {
+    var asked = 0;
+    final metered = _Meter(() {
+      asked++;
+      return true;
+    });
+    final mustWait = downloadMustWaitForWifi(db, metered);
+    expect(await mustWait(), isFalse);
+    expect(asked, 0);
+
+    await FeedCheckSettings(db, FakeScheduler()).setDownloadsWifiOnly(true);
+    expect(await mustWait(), isTrue);
+    expect(await downloadMustWaitForWifi(db, _Meter(() => false))(), isFalse,
+        reason: 'on Wi-Fi nothing waits');
+  });
+
+  test('where nothing can run in the background, nothing is asked',
+      () async {
+    final s = FakeScheduler(available: false);
+    final settings = FeedCheckSettings(db, s);
+    await settings.applyAtLaunch();
+    await settings.setBackground(false);
+    await settings.setWifiOnly(false);
+    expect(s.calls, isEmpty);
+  });
+
+  test('the last-checked line', () {
+    const h = 3600 * 1000;
+    expect(lastCheckedLabel(lastMs: null, nowMs: 0), 'Not checked yet');
+    expect(lastCheckedLabel(lastMs: 0, nowMs: 30 * 1000),
+        'Last checked just now');
+    expect(lastCheckedLabel(lastMs: 0, nowMs: 59 * 60 * 1000),
+        'Last checked 59 min ago');
+    expect(lastCheckedLabel(lastMs: 0, nowMs: 2 * h + 59 * 60 * 1000),
+        'Last checked 2 h ago');
+    expect(lastCheckedLabel(lastMs: 0, nowMs: 30 * h),
+        'Last checked 1 day ago');
+    expect(lastCheckedLabel(lastMs: 0, nowMs: 72 * h),
+        'Last checked 3 days ago');
+  });
+}

@@ -1,0 +1,822 @@
+# Changelog
+
+This repo had no CHANGELOG.md before this entry — the release notes surface
+that existed was `fastlane/metadata/android/en-US/changelogs/`, which is
+keyed by Android versionCode and isn't the right place to record a change
+that ships no version bump. This file starts here as a narrative record
+alongside it, in the common "Unreleased" convention, not a replacement for
+it.
+
+## 1.6.20 — 2026-11-20
+
+- **Trellis’s own Russian voice, as a preview.** Russian can now be read aloud by a voice made on your phone, with no internet: go to Settings, then Models, open Voices, and download the Russian voice (about 97 MB). Then open a Russian text and tap Read aloud; in the voices sheet it is the **Downloaded voice (preview)**. It is a preview because Russian marks no stress in writing, and the voice’s stress table puts it on the wrong syllable in about 1 word in 20. A fixed table, wrong on 1 word in 50 or fewer, follows in a few days and replaces it. Until then the phone’s own Russian voice is still there to pick in the same sheet.
+
+## 1.6.19 — 2026-11-17
+
+- **Trellis opens Word documents (.docx files).** In the Library, tap Add, then Import a file, and pick the document. You can also share it to Trellis from another app, or pick Trellis from the **Open with** menu of a file manager or a chat app. It arrives as a book: its headings become chapters, and its lists, links and tables come too. Footnotes show as small raised numbers in the text, and the notes themselves are gathered at the end of each chapter under “Notes”. When Trellis reads the book aloud, it skips the raised numbers. An old .doc file can’t be opened; Trellis says how to save it as .docx.
+- **Books from the web, chapter by chapter.** Some books on the web are one page that lists the chapters, each a link of its own. Copy that page’s web address, then in the Library tap Add, then Open a link, and paste it. Or share the page to Trellis from your browser. Trellis offers “Add the book”. Before it downloads anything, it lists every chapter’s address and asks whether to go ahead. Then it brings in the chapters one at a time and keeps them together as one book in your Library. If any chapter can’t be downloaded, Trellis names it and adds none of the book, so you never get a book with a chapter missing. A link straight to a Word document opens that document.
+- **Known limit.** Pictures in a Word document are left out.
+
+## 1.6.18 — 2026-11-14
+
+- **A big player.** Tap the player bar and it opens full screen, with a long bar you can drag to any point in the episode, the time played and the time left, and a large Play between the skip back 15 seconds and skip ahead 30 seconds buttons. Speed, the sleep timer, the Queue and the episode’s page are there too. Swipe down, or tap the arrow at the top, to go back to the small bar.
+- **Skip ahead 30 seconds is on the small bar again**, just right of Play.
+- **Translated episodes are part of their episode.** When Trellis has made an episode in the language you are learning (say Spanish), you no longer get a second episode in your lists. The Spanish audio sits with the original: on its page, and in the big player, where you can switch between the original and Spanish and carry on from the same paragraph. In Storage it shows as “Spanish audio” under the episode, and you can delete it on its own; the episode’s Listen in Spanish button makes it again. Spanish episodes you made before this update are joined to their originals, with their audio, Queue place, listening place and captures kept.
+- **Play puts an episode at the top of the Queue**, or moves it there, so the Queue always starts with what you are hearing. When that episode ends, it leaves the Queue and the next one starts. Play next, used while an episode plays, puts the new one second, right after it.
+- **Known limit.** Search still lists a translated episode as its own result. Opening it opens the original episode, set to that language.
+
+## 1.6.17 — 2026-11-14
+
+- **Storage counts kept pages.** Settings › Models & storage › Storage by item shows the pages a text keeps under that text: how many, about how big, and one delete. The text and its links stay, and keeping a page again gets it as it is that day. A page two texts link to counts once, under the older one.
+- **The voices’ licence record follows the owner’s ruling.** ADR-0022’s bar is the code, the weights and every voice clip, with the training data named where the maker names it. The 1.6.14 voices stay as they are.
+- **Known limit.** Keeping linked pages has not yet been tried on a phone.
+
+## 1.6.16 — 2026-11-14
+
+- **Copies of the pages an article links to.** A saved article now keeps its links, and they look like links in the reader. Tap one to read the copy kept on this phone, to keep a copy (Trellis asks first, then gets the page once and keeps its text, dated), or to open it in the browser. Linked pages in the reader’s ⋮ lists every link and can keep them all at once. Settings › Keep linked pages when saving does it for every article you save; it is off until you turn it on. Kept pages are not listed in the Library or search: you reach them from the text that links to them, and they go when that text goes. Articles saved before this keep no links.
+- **Known limits.** Storage does not yet count kept pages under the article that links to them, and keeping pages has not yet been tried on a phone.
+- **The Kokoro export’s licence, stated right.** The exporter’s code is MIT and the weights Apache-2.0 (ADR-0022, the voices reference).
+
+## 1.6.15 — 2026-11-13
+
+- **What the voices learned from, as far as is known.** The voice records (ADR-0022 and the voices reference) now say it plainly: Kyutai does not name the training data of its released Pocket TTS models, and the paper it cites trained on sets that include non-commercial and share-alike ones; Kokoro’s Chinese data was granted by a dataset company with no licence named. The code, the weights and every voice clip are clean. Nothing about the voices changes in this release.
+- **Old voice-download code is gone.** The path that unpacked the Piper-era voice archives had nothing left to unpack; the dictionary download path stays.
+
+## 1.6.14 — 2026-11-13
+
+- **Trellis’s own voices, in eight languages.** German, English, Spanish, French, Italian, Dutch and Portuguese speak with Pocket TTS by Kyutai; Chinese speaks with Kokoro. Each is one download in Settings › Models & storage › Voices, and works whatever voices the phone has. About 108 MB a language, plus 41 MB once for a part the first seven share; Chinese is about 175 MB. Each voice names its speaker and licence, and every one is labelled machine-made.
+- **The Supertonic voice is gone.** Its four languages now have voices of their own, and a phone that had downloaded it gets the space back when Trellis starts.
+- **How clearly the voice speaks, with the new voices.** Pocket TTS keeps its words at their own pace, so Clear, Slow and clear and Very slow make the episode slower with longer pauses after each sentence. Chinese and the phone’s voice speak slower too.
+
+## 1.6.13 — 2026-11-12
+
+- **Learn any language.** Settings › Learning language lists every language, with a search box. Each one shows what works today: reading, cards, transcribing, translating (and which way) and speaking, as works on this phone, needs a download, or not there yet. The languages an episode can be made in come first.
+- **36 more translators**, all free OPUS-MT models: Afrikaans, Czech, Danish, Finnish, Hungarian, Indonesian, Swedish, Vietnamese, Xhosa, Romanian, Galician, Turkish and Esperanto both ways; Catalan, Estonian, Lithuanian, Latvian, Thai, Croatian, Macedonian, Malayalam and Slovenian into English; Irish from English. Each was tried on real sentences first. A book can be marked as in any of these languages.
+- **A show’s playback settings are chips.** Speed, skip the start, stop before the end, how much audio to keep, and trim silence are each one row of choices (5 to 60 seconds, and Off). Nothing is typed. The sleep timer’s other length is a stepper.
+
+## 1.6.12 — 2026-11-12
+
+- **“Subs” on the bottom bar**, and all six labels drawn at one full size. The Subscriptions screen keeps its full title.
+- **Find a subscription** matches the start of any word, in any order, like every other search box.
+- **A spoken episode made again** as a different kind of audio clears the old audio file, so it no longer takes space.
+
+## 1.6.11 — 2026-11-12
+
+- **A calmer episode page.** One big Play (in the language you are learning when that episode is made), with Read, Queue and Download beside it. “This episode in other languages” is the one place to switch language for listening and reading. Everything else is in the ⋮, and nothing is shown greyed out.
+- **The bottom bar, in your order:** Subscriptions, Latest, Queue, Library, Courses, Settings. Subscriptions left the tops of Latest and the Library.
+- **Select left the menus**: a long press selects.
+- **Downloads** is a chip on Latest that always shows, even on a narrow phone.
+- **What Latest and Library are for**, in one line each: what arrives from your shows, and what you keep. The Library filters by its own kinds, and its search is now the same search as Latest’s.
+- **Read aloud in Russian**: a text whose language is unset no longer goes to a voice that cannot read its letters, Russian translations count when listing voices, and where the phone has no Russian voice the voices sheet has a button to Android’s voice settings.
+- **How clearly the voice speaks**, in Settings › Learning: Natural, Clear, Slow and clear, or Very slow. Made episodes are spoken at that pace with longer pauses, and the highlighted words still follow the voice.
+
+## 1.6.10 — 2026-11-12
+
+- **Pictures on cards.** Add a picture to any card you make or edit; it shows above the question, with no network. Backups carry the pictures, and the Anki export adds them to the card. PNG, JPEG, GIF or WebP, up to 3 MB.
+- **A transcript still being made says so.** A row shows “Transcribing, 12 of 40 min”, or “Part transcript” if it stopped, and offers “Resume transcribing”. Translate waits for the whole transcript and says how much is done.
+
+## 1.6.9 — 2026-11-12
+
+- **Read the transcript while it is being made.** Each finished part appears as it lands, and the job says how much you can read now. Your place holds, and a transcription stopped by the phone picks up where it left off.
+- **Stream or download, for each play.** An episode’s page and every row’s menu offer “Stream now” or “Download, then play”, beside your usual choice in Settings. A download in progress shows on Play.
+- **Every episode of a show.** Some shows link every episode to the same home page, and Trellis kept only one of them. Episodes are now told apart by their own id, so the whole show arrives, and subscribing to a show with archive pages fetches its older episodes in the background.
+
+## 1.6.8 — 2026-11-12
+
+- **Share sends the audio.** Share on an episode made in another language sends the audio file itself, named by its title, with a line saying the voice is machine made. A downloaded episode offers the link or the file. A file in a host’s own cloned voice is shared only if you turn that on in Settings (off by default).
+- **Make and edit cards by hand**, front and back or a cloze written the Anki way (`{{c1::word}}`). Hold a word in the reader and choose “Make a card”: the editor opens with its sentence and that word hidden.
+- **The example course is an example.** It is offered as “Try an example course”, and any course can be removed with its cards.
+- **Better Japanese to English.** The Japanese to English translator is now ElanMT-BT (CC BY-SA 4.0): clearly better on a standard test, and 14 MB smaller.
+- Fixes: a half-width “｡” is read as a full stop; the one-tap line says where the words were translated.
+
+## 1.6.7 — 2026-11-11
+
+- **Japanese reads as Japanese.** Scroll and Line modes no longer put a space between every Japanese character; Latin words inside Japanese keep their spaces, and the word being said still lights up.
+- **Better Japanese, online, if you choose it.** With your own Anthropic key set as the brain, the Translate sheet on an English text offers “Japanese, better”, with its cost (about 67 cents for an hour of talk). Nothing is sent until you say yes to “Send to Anthropic?”. A spoken episode made from it says it was translated online by Anthropic’s Claude.
+
+## 1.6.6 — 2026-11-11
+
+- **Settings is on the bottom bar**, always there, beside Latest, Queue, Library and Courses. Every app-wide setting lives there now: theme, reading, voices, listening, learning language, storage and backup. Each screen’s ⋮ menu holds only that screen’s own actions, in the same order everywhere.
+- **On this phone**: a chip on Latest shows only the episodes whose audio is on your phone, each with its size and the total at the top. Remove one episode’s audio, or several at once; the episode, its transcript, your place and your cards stay. An episode playing or being transcribed keeps its audio, and Trellis says so before you confirm. Models & storage links to the same list.
+- **This episode in other languages**: an episode’s page lists the original and every version made in another language, with whether its audio is on the phone. Tap one with audio and it opens and plays. Reading a translation with no audio says so, with a button to make it.
+- **Learning language** is in Settings, and “Change” on an episode’s page always shows, even with one language to choose.
+
+## 1.6.5 — 2026-11-11
+
+1.6.4 was built but never published; everything it had is here.
+
+**Listen to an episode in the language you are learning**
+- The one tap now makes an episode in any language Trellis can translate into and your phone has a voice for: Russian, German, Italian and more, as well as Spanish, French and Portuguese. A foreign episode can be made in English.
+- **Japanese**: English episodes can be made in Japanese, translated on the device by ElanMT-BT (CC BY-SA 4.0).
+- With no downloaded voice for a language, the phone’s own voice speaks and saves it. The episode says which voice made it.
+- “Which language are you learning?” lists what can be made and says in words why a language is missing, with a button to Android’s voice settings.
+- A second button beside Play on every episode row: make it, see it being made, then play it in your learning language. The episode’s page groups Listen and Read, original and translation.
+- **Make ahead**: switch a show on and its new episodes are made in your learning language on Wi-Fi while charging, so they play at once. Off by default; at most 3 per show; a storage limit removes the oldest first.
+- A one-tap job carries on after the app is closed or killed, and Stop really stops it.
+
+**Everyday listening**
+- Headphone keys skip forward and change episode.
+- No more sideways swipe on Latest; every Queue row has a plain Remove, with Undo; Mark played takes an episode off the Queue.
+- The widget’s Play always does something: it plays, or opens the app.
+- Translate keeps going with the screen off.
+- Settings say “Stream” or “Download, then play” plainly, and “Download on Wi-Fi only”.
+- Running jobs take one short line on Latest instead of big cards.
+- Follow along lights the word being said and keeps it in view, even at 4×. The “Justified text” switch, which did nothing, is gone.
+
+**Fixes**
+- An episode with no language of its own takes its show’s language.
+- “Change” on an episode’s page opened an empty screen.
+- Japanese text no longer gets a space after every 。.
+
+## 1.6.3 — 2026-11-10
+
+- The web app is smaller: the parts that only work on a phone (listening in another language, PDF reading) are no longer downloaded by a browser that can’t use them. The web bundle is 17,016 bytes lighter, compressed.
+- Nothing changes on the phone.
+
+## 1.6.2 — 2026-11-10
+
+- **Links in the reader can be opened.** A web address in a text looks like a link, and a tap on it asks where it goes, as show notes do, then opens it in your browser. It works for any text: a Markdown file, a paste, a PDF, a transcript.
+- Fix: in 1.6.1 a long link address from a Markdown file showed as “…”. The address now follows the link’s words and is shown shortened. A Markdown file imported with 1.6.1 keeps the old form until it is imported again.
+
+## 1.6.1 — 2026-11-10
+
+- **Markdown and text files open in Trellis.** “Import a file” in the Library takes .md, .markdown and .txt. A Markdown file’s headings become its chapters; a link keeps its words and its address; each list item is its own line; each table row reads as one sentence; bold, italics and the other marks are gone. A .txt file is read as plain text.
+- Android offers Trellis under “Open with” for Markdown and text files, from a file manager or a chat app. A Markdown file shared to Trellis is read as Markdown too.
+- Read aloud doesn’t say a list mark or a link’s address.
+- **Transcription quality** on Models & storage: Fast (the default), More accurate, or Most accurate. The larger models make fewer mistakes with names and take longer; nothing changes unless you choose.
+- Fix: words were repeated where two parts of a transcript met (“into two measures … into two measures”), and then translated and spoken twice.
+- Fix: “[BLANK_AUDIO]” and similar notes from the transcriber no longer appear in transcripts. Transcripts already made keep them until you use “Transcribe again”.
+- Fix: a saved translated episode whose audio was deleted is made again by the same tap, instead of being left as a row that plays nothing.
+- Not yet: links in a Markdown file are shown with their address but can’t be tapped.
+
+## 1.6.0 — 2026-11-10
+
+- **Listen in the language you’re learning, in one tap.** On an episode’s page, “Listen in Spanish” transcribes the episode, translates it, speaks the translation and plays it. The first time it asks which language you’re learning and, once, what it needs to download. It says which stage it is at, keeps going behind a dark screen, and picks up where it stopped if it is cut off. Spanish is the language Trellis can save as audio today; others can still be translated and read aloud from an episode’s Read page.
+- **The spoken translation is a real audio file.** It is made once and kept (Opus, about 11 MB an hour) as an episode of its own beside the original, named for its language. It plays, queues and downloads like any episode, without running the voice again. Its page says the voice is machine made, and so does the file’s own tag.
+- **The words light as they are said, in the translation too.** The saved episode’s text is the translation, and the page lights each sentence at its real time and each word within it.
+- Follow along no longer stretches the gaps between words. “Justified text” applies to the Line highlight, where the last line is left alone.
+- Read aloud skips citations by default: author and year in round brackets, a year after a name, numbers, keys and source notes in square brackets, footnote marks and bare links. The page keeps them. “Read citations aloud” in the reader’s menu turns them back on.
+- PDFs with a text layer can be brought in as books: “Import a file” in the Library takes EPUB or PDF, and a PDF can be shared in from another app. Headings, paragraphs, two columns and right-to-left text are rebuilt; running heads and page numbers are left out. A PDF that is only pictures of pages, or is locked, is refused in plain words.
+- Play on an episode that isn’t downloaded can download it first: “Download first, then play”, under Subscriptions, Wi-Fi and data. Off until chosen.
+- “Download only on Wi-Fi” for downloads started by hand, and a door to the Wi-Fi settings on Subscriptions.
+- A headset’s Next and Previous buttons do what you choose (skip forward 30 seconds by default).
+- Read aloud goes on behind a dark screen and shows on the lock screen, like a podcast.
+- Fix: the next queued episode starts behind the screen, a finished episode leaves the Queue at once, the whole player bar opens the episode, and Play on a played-out episode starts it over.
+- Size: PDF reading adds PDFium, about 5 MB. The release check now fails an APK whose PDFium is not the pinned build.
+
+## 1.5.10 — 2026-11-08
+
+- Fix: downloads and transcriptions keep going when you leave the app. Their progress notification now really holds the app awake; before, Android could pause a job as soon as Trellis was out of sight and nothing was playing.
+- Fix: the whisper libraries are back in the Android app. 1.5.9 shipped without them. A release build now fails if either library is missing.
+- Size: the arm64 APK is 82,269,153 bytes, up from 77,087,662 in 1.5.9 because the two whisper libraries return. Trimming unused files took 129,219 bytes off what it would otherwise be (82,398,372).
+
+## 1.5.9 — 2026-11-07
+
+- Deleting a transcript or a translation no longer asks first. It goes to Recently deleted, in Models & storage, for 30 days, where Restore brings it back. A restore that would mix with a newer transcript or translation is refused with a plain message, and a translation can’t be deleted while it’s being made.
+- The player bar is one slim row. Tap the title or the art to open the episode; drag across the title to scrub; Back 15 is on the bar; ⋮ has Go to show and the rarer controls. X closes the bar for good, until you play something again.
+- One Play per screen. Read aloud pauses any show that’s playing: one voice at a time. A playing row says “Playing”. The RSVP pacer button is now “Start”.
+- Read aloud works on podcast transcripts with the downloaded neural voice, and stops with a plain message if the voice fails or a call comes in.
+- Read aloud reads translations in their own language. Both reads each sentence, then its translation, by default; “Speak in X” became “Read the X aloud too”. Translation only reads the translation. Listen in a translation, from the work page, opens Translation only for that visit. Pick a voice per language in ⋮, Read aloud voices.
+- With a translation into a language the downloaded voice can’t speak (Russian, say), the whole run uses the phone’s voices, the English included. With no voice installed for the language, Read aloud says so and points to Android’s Text-to-speech settings instead of reading it in the wrong voice.
+- Translation downloads are about 115 MB a pair instead of about 249 MB: the six oldest pairs use a smaller decoder, checked against the old one sentence by sentence (ADR-0020). Pairs already on the phone show “Update available” (about 60 MB) once, and the old file is deleted. A translation interrupted under 1.5.8 needs that update, then the language picked again.
+- Start-up never downloads anything on its own. It only clears away model files nothing uses any more.
+- The unused Qwen download is gone, and a copy already on the phone is deleted.
+- Your listening place is kept whichever way you pressed Play: the app, the widget, the lock screen, the notification or a headset. It’s saved every 10 seconds while playing and whenever playback stops, and a scrub on the lock screen sticks.
+- Calmer spacing in Follow along: lines step evenly, words sit a normal space apart, and nothing shifts as the highlight moves. The current word is shown as a solid chip. A translation sits close under its sentence. The Line view’s Both spacing changed slightly too.
+- Fix: starting a translation into a new language no longer shows or reads the old one while it starts.
+
+## 1.5.8 — 2026-10-27
+
+- Follow along lights each word as it is heard, at any speed up to 4x; one "Back to audio" button in every mode.
+- Translations show in RSVP, Line and Follow along, as "Translation only" or "Both", remembered per work (schema 32).
+- Pages open inside their tab, so the bottom bar stays; Library gets + Add and Subscriptions; app-wide items sit in the Library menu.
+- Storage by item, and Remove download / Delete transcript / Delete translation on the work page.
+- The downloaded neural voice plays (registered at T1).
+
+## 1.5.7 — 2026-10-25
+
+- Fix: translating crashed the app on phones. The release build's code shrinker renamed ONNX Runtime's Java classes, which its native library looks up by name. A keep rule and a test now guard it.
+
+## 1.5.6 — 2026-10-25
+
+### Fixed
+- **Translate finds its models.** The Translate sheet said there was no
+  offline translator even after you had downloaded one.
+- **Translate waits for text.** An episode without a transcript no longer
+  offers to translate, and nothing offers to translate English into
+  English.
+- **The episode page keeps up.** Read works as soon as a transcript lands,
+  Transcribe shows while there is none, and Download goes away when the
+  download finishes.
+- **Tapping speed opens one list**, not a stack of them.
+
+### Changed
+- **Speed:** swipe on it as before; a tap now opens a plain list of
+  speeds (0.75× to 4×) with the current one checked.
+- **"On this device" is now "Models & storage."**
+
+## 1.5.5 — 2026-10-25
+
+### Added
+- **Share to Trellis.** Share a link, text or a file from any app. Links
+  and text land in Latest under "Shared" straight away; books go to the
+  Library. A Bluesky, Mastodon or Substack link offers to subscribe.
+- **A home-screen widget**: what's playing, with Play/Pause and skips, and
+  the book or article you were reading.
+- **Translation for real languages.** 25 language pairs with English,
+  downloaded from the Translate sheet when you pick one; other pairs go
+  via English. A translation picks up where it stopped.
+
+### Changed
+- **Two ways to read:** RSVP (one word at a time, eyes still) and Page,
+  whose highlight follows along word by word or by line. Tap a word to
+  play from there. Scroll is gone.
+- **Speed goes from 0.5× to 4×.** Swipe up or down on it, or tap for
+  presets.
+- **The mini player stays on every screen** while something is loaded.
+- **Starting a transcription says so** at once, with its progress.
+
+## 1.5.4 — 2026-10-25
+
+### Changed
+- **The same row on every list.** Latest, the Queue, History, the
+  Library, a show's page and search all show an item the same way, with
+  Play (or Read) on the row and the rest in its ⋮ menu.
+- **Every item has its own page.** Tapping a row opens it: Listen and Read
+  side by side, the language to read or hear it in, and the episode's
+  full show notes. Times in the notes are tappable and play from there;
+  a link asks before it opens, and says where it goes. The page opens to
+  whatever you last used for that item: listening or reading.
+- **Subscriptions is faster**, even with hundreds of shows, and has a
+  "Find a subscription" box and a chip for each shelf.
+- **Search is rebuilt.** Results come in sections: Shows, In titles, In
+  the text (show notes and article text) and Said in (transcripts). Each
+  section says how many it found and shows them all on request. Word
+  endings no longer matter ("machines" finds "machine"), every word can
+  be typed in part, and show notes are searched. The Library's filter
+  searches the same way. A thin bar shows while a search is running.
+- **Importing a list of shows** can be stopped, says how many you already
+  follow, and offers to show them.
+- **Remove** takes a kept episode out of the Library, with an Undo that
+  stays until you dismiss it.
+
+### Fixed
+- After a restart, a paused episode's slider sits where you left off, not
+  at the start.
+- Opening the app while a background check was running could fail with
+  "database is locked"; it now waits for the check to finish.
+
+### The first launch after updating
+- Show notes fill in over the next few feed checks, a few shows at a time,
+  rather than all at once.
+- Search rebuilds its index in the background. Until it is done, the
+  search screen says "Updating search… N%" and search still works, but
+  without word endings, article text or episode descriptions.
+
+## 1.5.3 — 2026-10-24
+
+### Changed
+- **Latest is a permanent archive.** Nothing decays any more: every item
+  from every show and site you follow stays in Latest, newest first, until
+  you unfollow it. Items an older version had hidden come back. Latest
+  loads a page at a time as you scroll, so a big archive opens fast, and a
+  quiet "New since you last looked" line marks what arrived since your last
+  visit. It keeps its place when you switch tabs. Removing a podcast
+  episode from the Library now only takes it out of the Library; it stays
+  in Latest with its transcript.
+- **The Queue is a tab**: Latest · Queue · Library · Courses. Latest is
+  where the app opens. History has its own button on the Queue tab.
+- **Plain names.** Up Next is the Queue, Up Last is History, the follow
+  list is Subscriptions, and the Inbox is Latest.
+- **Theme** (light, dark or follow the phone) moved into each tab's ⋮
+  menu.
+- **Read a podcast without playing it.** A transcribed episode has a Read
+  button beside Play; it opens the transcript, and tapping a line plays
+  from there.
+- **The reader has a Play button** (Listen) whenever the text has audio.
+- **Faster transcription.** Trellis detects a show's language once and
+  locks it for the episode, keeps the model loaded for the whole episode,
+  starts each 30-second window with a fresh state, and phones whose CPU
+  supports it get a faster whisper build.
+- **A one-time full refresh.** After updating, the next refresh reads
+  every feed in full once, to learn each show's declared language.
+
+## Before 1.5.3 — fleet rollout (2026-09)
+
+Some lines below were overtaken by 1.5.3: the Inbox is Latest, nothing
+decays, Up Next is the Queue, and the theme is in each tab's ⋮ menu.
+
+
+### Changed
+- **Plain words.** The River is the Inbox; Echo is What you've built; the
+  espalier is the course map; rungs are steps; the reader's Parafoveal
+  toggle is a Nearby words chip and sigma is Focus spread. RSVP, SM-2 and
+  FSRS are explained where they are chosen.
+- **First run opens into the task.** No name to type: a first launch
+  opens a Library for "Reader"; later launches reopen the last reader.
+- **The reader remembers** its mode, speed and nearby-words setting per
+  reader.
+- **Deletes.** Remove, Unfollow, a word's Remove and Remove profile act at
+  once with an Undo that never times out; swiping a word away asks first.
+- **Inbox decay** is stated on every row in days; what leaves is kept 30
+  more days, then deleted, and items in Up Next or with captures do not
+  decay.
+- **Theme**: light, dark or follow the phone, on every tab bar.
+- **Top bars** name their commands; **every screen** is capped at 640 dp
+  wide; **errors** are plain sentences with details behind a button; the
+  course map's ripeness darkens steadily; copy uses proper punctuation.
+- **Backup**: a new phrase is checked word by word; the PWA keeps its
+  words under Trellis's own name; backups are saved as
+  `trellis-backup-<date>.ohbk`.
+- Lora and Nunito now come from openhearth_design; the app ships no font
+  files of its own.
+
+## 1.4.1 — 2026-08-17
+
+A hotfix for a 1.4.0 that did not start. Reported from a real phone:
+the app showed its launch logo and never got past it.
+
+### Fixed
+
+- **The app never painted a frame.** Campaign 9 Phase 2e added the
+  lock-screen media session and landed only half of what
+  `just_audio_background` requires: the manifest's `<service>` and
+  `<receiver>` elements, but not the launcher activity's obligation to
+  hand audio_service its shared `FlutterEngine`. `AudioServicePlugin`
+  detects exactly that mismatch (`wrongEngineDetected`) and throws
+  `IllegalStateException` on the first method call it gets — which is the
+  `configure` that `JustAudioBackground.init()` sends, and which `main()`
+  awaits *before* `runApp()`. The throw escaped `main`, so there was no
+  first frame, no error UI and no crash dialog: Android simply kept
+  showing `@style/LaunchTheme`. `MainActivity` now extends
+  `AudioServiceActivity`. The PWA was never affected — the web tier's
+  `initAudioBackground()` is a no-op stub.
+- **A boot step can no longer take the boot with it.** Everything `main()`
+  awaits is on the critical path to the first frame, not just to its own
+  feature, and a pre-`runApp` throw is invisible by construction. Each
+  step now runs through `bestEffort` (`lib/bootstrap/boot_guard.dart`):
+  it falls back, reports to `FlutterError` so logcat keeps the stack, and
+  records a line shown in a dismissible banner over the app. Degraded and
+  honest beats a logo that explains nothing.
+
+### Added
+
+- `test/android_host_engine_test.dart` — the guard that would have caught
+  this. 1145 Dart tests could not see it, because nothing in the suite
+  had ever read the Android host configuration. It asserts the invariant
+  (the activity the manifest declares must provide audio_service's shared
+  engine) rather than one file path, and fails when its own inputs go
+  missing instead of passing on nothing-found.
+
+## 1.4.0 — 2026-08-16
+
+Campaign 8 "Babel widens" (`docs/adr/0014-babel-widens.md`): the
+translation organ ADR-0008 shipped for Spanish only generalizes to any
+language pair — the hub-and-spoke law is 2N models for N target
+languages, never N², and every registry entry, test, and picker now
+reflects it rather than hardcoding Spanish.
+
+### Added
+
+- Four new Marian pairs, verified with real inference before
+  registration: German, Russian, and Chinese, each shipped both
+  directions except English->Chinese (see Fixed, below, for why).
+  Portuguese and Japanese were evaluated and NOT shipped — Portuguese
+  has no clean-licensed ONNX conversion on the trust ladder; Japanese's
+  base model collapses to a pure `<pad>` token at decode step one and
+  stays incoherent even past that, needing a Brain rather than the
+  offline floor. Full accounting in `docs/reference/mt-models.md`.
+- The reader's "Translate…" action is a real picker over whichever
+  target languages are actually downloaded for a work's own declared
+  source language, replacing the fixed "Translate to Spanish" menu
+  item. A new per-work language selector lets a reader correct a work's
+  declared source language (no auto-detection — declared, not guessed).
+- A CJK segmentation baseline in `loom_core` (the UAX #29 default
+  absent a dictionary: one Han ideograph per unit, Katakana runs kept
+  together, Hiragana one character at a time) replaces the old
+  behavior, where a long space-less CJK run collapsed to a single `…`
+  placeholder and a whole CJK paragraph spoke as one long utterance.
+- `BrainTranslator`: a second Translator rung sitting on domovoi's
+  Brain interface instead of an on-device ONNX session, chunking 10-20
+  sentences per request with strict JSON-array parsing and per-sentence
+  fail-closed behavior. Built and fully tested, including the specific
+  degraded state a stove tier with nothing real behind it produces —
+  but not yet wired into the live app (no tier ladder, no consent
+  routing, no UI picker rung reach it). `docs/adr/0014-babel-widens.md`'s
+  Phase 5 section has the full accounting of what's left.
+
+### Fixed
+
+- The shipped app offered to translate an English work into English —
+  the generalized picker now excludes a work's own declared source
+  language from its target list, with a second, defensive refusal at
+  the point a translation would actually start.
+- Two real regressions an adversarial review caught before release:
+  picking a translation target could offer a "Show ⟨language⟩" toggle
+  with zero stored sentences behind it (setActiveTranslationLang runs
+  before a batch produces its first row, so a fresh pick mid-run or a
+  cancel-at-zero left a dead control); and a pre-campaign work with
+  stored Spanish, but its display toggled off, lost the "Show Spanish"
+  toggle entirely on reopen — indistinguishable from never having
+  translated anything.
+- Speaking a German, Russian, or Chinese translation with a neural
+  voice primed and preferred would have thrown an uncaught
+  `SupertonicUnsupportedLangException` mid-utterance — Supertonic's own
+  language gate covers only English and Spanish. Engine selection now
+  checks the active translation's language before choosing a voice,
+  never reaching Supertonic's gate for a script it can't encode.
+- "Household stove" — internal jargon that read as insane to a real
+  device tester — is "Home desktop" everywhere it was user-visible
+  (the brain settings tile, its own error message, and the provenance
+  line a generated course/critique/recap carries). The internal
+  `BrainTier.stove` identifier is unchanged; this is copy only.
+
+### Not shipped, on the record
+
+- `opus-mt-en-zh` (English -> Chinese): translation quality is real and
+  usable, but a golden-test render of the scroll-mode display showed
+  Chinese glyphs as tofu boxes, and bundling a CJK font to fix it
+  (measured: 8.3MB for a single region/weight) doesn't fit the app's
+  remaining APK size budget. `opus-mt-zh-en` (the reverse direction,
+  English output, no glyph risk) ships unaffected.
+- Background/lock-screen playback for the speak-in-X loop, a real
+  TinySegmenter-quality Japanese word segmenter, and a bundled CJK font
+  are all named as follow-ups, not built this pass.
+
+---
+
+**Campaign 9 ("the shakedown")**: the first real device test of 1.3.0
+came back and this campaign fixes what it surfaced. Every item below
+traces to a specific device-test observation, not a feature checklist.
+No version bump here (the release finale happens once every in-flight
+campaign merges).
+
+### Added
+
+- **A visible play/pause glyph, everywhere it was missing.** Device
+  report: "the play/pause circles don't have symbols in them." Root
+  cause: `OhTheme`'s app-wide `iconTheme` color collided with
+  `IconButton.filled`'s own fill token. Fixed at the theme, not
+  per-callsite.
+- **Discoverable controls.** Two bookmark icons now read differently
+  (capture vs. the captures list, with a "View" snackbar action to the
+  list); tooltip gaps closed (library/feeds/river popup menus, the
+  speed button); the Echo door gained a word, the daily-review chip its
+  own icon; sleep-timer duration buttons size to their own text instead
+  of clipping "Custom…"; the library filter is a live modal sheet, not
+  a separate pushed screen.
+- **The mini player survives a restart.** It used to render nothing at
+  all once the app restarted (`current == null` → blank); it now
+  rehydrates PAUSED at the last-played work's saved position, no
+  autoplay ever. The river's "Up Next" queue gained its own AppBar
+  door, reachable with nothing currently playing.
+- **The daily-review screen shows what a grade actually did.** A
+  progress counter, distinct capture-card fronts (title + timestamp,
+  transcript resolved at render time rather than backfilled), grade
+  labels that state their consequence instead of bare "Soon"/
+  "Eventually".
+- **Full-content feeds, and an honest library** (ADR-0015). A
+  Substack-shaped feed's full post is recovered from `content:encoded`
+  through the same HTML→segments path URL intake already uses, instead
+  of a 300-char stub. The library now shows only promoted works — river
+  ephemera stay in the river — and every row gained a date subtitle.
+- **River artwork.** Channel-level images, fetched once, shown as a
+  ~40dp rounded thumbnail leading each row (schema v20).
+- **Lines: a third way to read.** A scroll-family mode highlighting one
+  visual line at a time, paced on the same word-level clock RSVP
+  already uses. The mode switcher is now a labeled three-way picker
+  (Scroll / Words / Lines).
+- **The reader follows the player.** When audio for the open work is
+  playing, the reading cursor now moves with it — a "Following audio" /
+  "Resume following" chip shows and controls the state; any manual
+  interaction detaches.
+- **The lattice logo replaces Flutter's stock template.** Every Android
+  mipmap and PWA icon now derives from `assets/brand/trellis-logo.svg`
+  via `tool/generate_brand_icons.py` — legacy + adaptive launcher icons,
+  a notification small icon (generated ahead of the work that will use
+  it), and the PWA's maskable variants + favicon.
+- **Lock-screen/pull-down-tray playback controls** (ADR-0015 Decision
+  3). Deferred mid-campaign, then built at review — this is the user's
+  #1 device finding, the one the campaign is named after.
+  `JustAudioBackground.init()` runs once at startup, Android/iOS only;
+  every episode, audiobook and rehydrated play now tags its audio with
+  the work's id/title, the feed's title as album, and its downloaded
+  artwork when one exists. The Android manifest gained the package's
+  own required service + media-button receiver, using Phase 8's
+  notification icon (an orphan until now). Lock-screen RENDERING itself
+  stays device-only and unclaimed — everything above is proven up to
+  the tag that reaches the player, not past it.
+
+## 1.3.0 (2026-08-15) — build 2007
+
+The gap-map release: eight campaigns landed here, one per gap the honest
+feature audit found. The study crown (ADR-0009); RFC 5005 paged-feed
+archive following; Campaign 1 ("the player earns love") — five small
+mercies for the podcast player; Babel (ADR-0008), the on-device
+translation organ; reader depth (ADR-0010) — typography, Parafoveal,
+dictionary, recaps, Echo; "Triage & rules" (ADR-0011) — river gestures,
+saved views, per-feed rules, dedup; offline DSP (ADR-0012) — trim
+silence and even out volume on downloaded episodes; and audiobooks
+(ADR-0013) — a folder IS the book.
+
+### Added
+
+- Reader depth (ADR-0010): five additive passes over the reading surface
+  itself. **Typography settings** — a real settings screen with live
+  preview (typeface, line height, font scale, justification) for the
+  scroll/print reader; typeface choice is Lora or Nunito, the two faces
+  actually bundled (an old feature-matrix claim that a third,
+  OpenDyslexic, was already bundled was never true — fixed alongside
+  this). **Parafoveal mode** — the donor's lost third RSVP display
+  (Gaussian neighbor fade/scale/blur, a sigma slider, guide+tick marks),
+  plus a jitter fix for the classic-mode ORP pivot (a reservation, not a
+  perfect anchor — the free-width after-span can still shift a row's
+  center for very different word lengths). **Follow-along** — scroll
+  mode auto-scrolls the segment currently being read into view, reusing
+  the RSVP cursor/timer wholesale. **On-device dictionary lookup** — a
+  new pure-Dart StarDict parser (`packages/stardict_core`, real dictzip
+  random access) backs a tap-hold definition sheet that absorbs the
+  reader's existing "add to word ledger" gesture rather than stacking a
+  second one on the same word. **"Catch me up?" recaps** — a dismissible
+  chip on a work reopened after 3+ days untouched with real progress,
+  offering a Brain-generated spoiler-safe summary (assembled only from
+  text before the reader's own cursor) in a sheet that is never saved.
+  **Trellis Echo** — a new, reader-facing (never PIN-gated) private
+  year-in-review off the Courses tab: works finished, active reading
+  days, words collected, cards mastered/reviewed, captures, and audio
+  position reached — deliberately never "minutes listened" or "words
+  read," since neither is actually tracked anywhere in this schema (the
+  spec's own three headline totals reduced to one computable one, on
+  verification). A shareable card (native only) and a word-ledger+
+  captures export (Markdown/JSON, reusing the existing backup file-save
+  door) round it out; the spec's "Export highlights" doesn't ship as
+  named — there is no highlight/passage table in this schema, so the
+  export is named for what it actually produces.
+- The study crown (ADR-0009): four local-first features cloud apps charge
+  for. **Daily review** — a gentle two-button (Soon/Eventually) resurfacing
+  surface for the word ledger and captures, mapped onto the existing SM-2
+  scheduler's again/good, with a quiet due chip on the Courses tab that
+  only appears when something is actually due. **Capture-while-listening**
+  — one tap on the player bar or the synced-text view saves a moment,
+  sentence-snapped to the transcript when one exists (never a raw ±15s
+  guess) and backfilled automatically once transcription completes for
+  captures taken before one did. **Explicit read<->listen handoff** —
+  "Listen from here" in the reader and "Read from here" in the synced-text
+  view, both over the same position row and alignment projection the app
+  already used implicitly. **FSRS-5 as an opt-in scheduler** — a second,
+  fully tested pure-Dart scheduler beside the sealed SM-2 core, additive
+  and switchable per profile from a settings menu on the Courses tab
+  (one honest sentence of copy on the way in, an instant no-dialog resume
+  on the way back out). The live study session now actually reads the
+  choice and grades through it — Classic byte-for-byte as it always did,
+  FSRS seeded lazily from a card's classic history on its first FSRS
+  grade — closing a gap an earlier pass in this same campaign left open
+  (a scheduler nothing could invoke). Curriculum progression
+  (unlock/mastery) stays Classic-based under either scheduler, a stated
+  scope limit (see ADR-0009 for exactly what shipped, including two
+  deliberately-not-built pieces: the playback-notification capture
+  action, and "make this an extract," which has nowhere to feed in this
+  checkout).
+- Paged-feed archive following (RFC 5005): `comms_core` now parses a
+  channel/feed-level `rel="next"`/`rel="prev-archive"` link and, on
+  request only, walks that chain to recover episodes a host has truncated
+  off its current feed document — most podcast hosts cap their RSS at the
+  newest N episodes, and a subscriber who joins late previously had no
+  way back past that cap. The walk is capped at 25 pages, dedupes items
+  across pages, and reports honestly however it ends (end of archive, the
+  cap, a failed hop, an unsafe next link).
+- A feed detail screen (tap a feed in "Feeds" to open it): the feed's own
+  episodes, and a "Fetch older episodes" action when the last refresh
+  found an archive link. For the overwhelmingly common case where it
+  didn't, one calm line says so instead of leaving the missing episodes
+  looking like a bug.
+- A sleep timer on the episode player surface: 15/30/45/60 minutes or "end
+  of episode", with a volume fade over the final 20 seconds, a light
+  haptic shortly before stop, and shake-to-extend (+10 minutes, duration
+  mode). Lives on `PlayerController`, not a widget, so it survives
+  navigation; a duration-mode timer keeps running into whatever plays
+  next, an end-of-episode timer is consumed by that episode's own natural
+  completion.
+- Per-podcast playback settings: a speed override, skip-intro seconds, and
+  skip-outro seconds, each feed's own ("Podcast settings" on its menu).
+  The player applies the override on start, auto-seeks past the intro
+  only on a fresh start (never on resume), and treats crossing
+  duration-minus-outro as the same "finish" as playing to the true end.
+- An Up Next queue: Play next / Play last on any episode tile, a queue
+  view with drag-to-reorder and remove, reachable from the mini player
+  bar. Finishing an episode removes it from the queue by default; a
+  household setting can keep it there instead. An empty queue after
+  finishing just stops — no invented state.
+- Smart resume: resuming a paused episode rewinds by a small amount
+  scaled to how long it was paused (2s under a minute, 5s under an hour,
+  10s beyond).
+- Archive, never forget: episode rows are never deleted by storage
+  reclaim — only the downloaded audio FILE, per a feed's own "keep latest
+  N" setting, excluding anything queued or mid-listen. The river dims
+  (never hides) an archived episode and offers "Re-download audio" in
+  its place. This is a NEW, narrower law than the existing ADR-0003
+  ephemera sweep, which still removes whole rows after 30 days unless
+  promoted — that law is unchanged.
+- Triage & rules (ADR-0011). **Keep and Let it pass**: swipe (or the
+  overflow menu — every river row now has one, including text/article
+  rows that had none before) a river item into the library or explicitly
+  past it, both with an undo snackbar that restores the exact prior
+  state. Nothing is ever removed from the river by a swipe — the tile
+  shows its new state in place, the house idiom already used for
+  archived rows. **Saved filtered views**: a small query over the
+  library — text search, type, feed, read state, pinned, any
+  combination — saveable as a named view, shown as tappable chips,
+  reorderable and deletable from a new filter screen. **Per-feed rules**:
+  skip / mark-read-on-arrival / auto-keep, matched on title or
+  description, evaluated before an item ever enters the river — editable
+  from each feed's own settings screen. **Cross-feed dedup**: a
+  canonical-URL match (after tracker-parameter stripping) or an
+  exact-normalized title within 48h hides the younger copy of a story
+  syndicated across feeds — never within the same feed, where a repost
+  is the author's own choice. **Tracker-parameter stripping**: a curated
+  list of tracking-only query parameters (utm_*, ad-platform click ids,
+  newsletter send tracking) is stripped from stored article links and
+  dedup comparisons — never from feed fetch URLs or episode audio URLs,
+  whose query params can be load-bearing.
+
+### Changed
+
+- Schema v12: `Feeds.speedOverride`/`skipIntroSeconds`/`skipOutroSeconds`/
+  `keepLatestAudio`, `Episodes.archivedAtMs`, `Profiles.keepFinishedInQueue`,
+  and the new `queue` table, landed in one migration hop rather than one
+  per feature — v8 (`Feeds.nextPageUrl`, the archive-following campaign),
+  v9 (`Profiles.scheduler`), v10 (`captures`), and v11
+  (`daily_review_cards`, all three the study crown) came first.
+- A river episode's overflow menu now always offers Play next/Play last
+  (a database write, not an ML feature) — previously the whole menu was
+  gated behind local-ML availability because transcribe was the only
+  thing in it.
+- Schema v15: `SavedViews` (new table), `Feeds.rulesJson`,
+  `Episodes.dedupReason`/`duplicateOfWorkId`. v13/v14 are reserved for
+  sibling campaigns landing separately; this branch jumps 12 -> 15
+  directly rather than collide on those numbers.
+- **Corrected**: the feature-matrix's "Auto-download queue with metered +
+  disk-space guards" row was an overclaim — `Feeds.autoDownload` has
+  always been a column with zero callers, no filter UI exists, and no
+  episode-audio-download path exists outside the (consent-gated)
+  transcription pipeline. Left unwired this pass, deliberately: wiring a
+  bare downloader would bypass ADR-0003 law 6's one egress consent gate,
+  not merely skip the metered/disk guards the matrix claimed (see
+  ADR-0011 §5). Marked Degraded/not-wired.
+- **Corrected**: the feature-matrix's "Library: debounced search, sorts,
+  filters…" row also described a screen that didn't exist — `LibraryScreen`
+  had none of the three before this campaign built them (see ADR-0011 §2).
+
+### Added
+
+- `MarianTranslator` (ADR-0008 "Babel") — a real on-device English->Spanish
+  machine-translation engine over `opus-mt-en-es` (int8-quantized ONNX,
+  `flutter_onnxruntime`), the organ this app's founding dream was
+  actually missing: "a podcast player that automatically translates
+  episodes... so I could practice Spanish while listening." Mirrors
+  `SupertonicSpeechEngine`'s residency/serialized-call/dispose-waits laws
+  and conditional-export trio. Proven two ways: the generation loop's own
+  mechanics (past-KV threading, a length cap, EOS stop, and — the load-
+  bearing discovery — a fix for the merged decoder graph's cached branch
+  silently returning degenerate cross-attention output, verified directly
+  against the real graphs before any Dart was written) against a
+  deterministic faked session, never touching a platform channel; and,
+  separately, the whole pipeline against the real downloaded model in
+  Python, producing genuinely fluent Spanish. See
+  `docs/adr/0008-babel-the-translation-organ.md` for the trap this
+  engine routes around and `docs/reference/feature-matrix.md`'s
+  Translation entry for how it's actually used, below.
+- A pure-Dart SentencePiece unigram tokenizer (`packages/ml_runtime`) —
+  a hand-rolled protobuf reader for a `.spm` model's piece table plus a
+  from-scratch Viterbi encoder, verified against 25 golden vectors
+  generated with the real `sentencepiece` library against the actual
+  downloaded model (24 match exactly; one documents a deliberate,
+  permanent scope limit — no NFKC precompiled-charsmap port).
+- `opus-mt-en-es` registered in `ModelRegistry.starter()` (T2, ~246MB,
+  CC-BY-4.0) with a `MarianModelLayout` naming which downloaded file
+  plays which role, and a models-door label ("Spanish translation —
+  English to Spanish, offline").
+- Babel wired end to end (ADR-0008 Phases 3-4): a per-work
+  sentence-indexed translation store (schema v13) that survives restarts
+  and resumes where it left off; a "Translate to Spanish" action on a
+  work, offered only once `opus-mt-en-es` is actually downloaded, that
+  runs as a cancellable batch over the work's sentences with a calm
+  progress card — already-translated sentences are skipped on a re-run,
+  a failure on one sentence never blocks the rest; a scroll-mode "Show
+  Spanish" toggle that pairs each original sentence with its translation,
+  visually subordinate, once any exist; and a session-only "Speak in
+  Spanish" toggle that has the speak loop (system voice OR the
+  downloaded Supertonic voice) speak each STORED translation while the
+  karaoke cursor keeps advancing through the original sentences — a
+  sentence with no translation yet falls back to English, no gap.
+  `supertonicSupportedLangs` widened from English-only to `{'en', 'es'}`:
+  there is no separate Spanish voice upstream to download (Supertonic's
+  ten voice styles are speaker timbres, language-independent; `lang` is
+  already a per-call parameter the engine validates against all five of
+  the v2 model's languages) — but this is an architectural finding, NOT
+  a verified-quality claim. The M1 voice has been reviewed for English
+  only; Spanish output through it has not been heard on real hardware.
+  Said plainly here, in the ADR amendment, and in the feature-matrix,
+  rather than left unbuilt a second time.
+
+### Fixed
+
+- `docs/reference/feature-matrix.md`'s Translation entries claimed a
+  Brain-routed LLM-translation mechanism for v1 that was never actually
+  built — the shipped mechanism has always been whisper's own built-in
+  translate task (X->EN, timestamp-projected onto transcript segments),
+  with no Brain/LLM call anywhere in that path. Caught while auditing the
+  code this ADR builds alongside; corrected in place.
+
+### Fixed
+
+- The pinned ffmpeg dependency moves from `ffmpeg_kit_flutter_new`
+  (the Full-GPL variant — verified to statically link GPL-3.0 x264/x265/
+  xvidcore/vid.stab, contradicting ADR-0007's "MIT-clean APK" claim) to
+  `ffmpeg_kit_flutter_new_audio` (the same publisher's audio variant —
+  LGPL-3.0 only, verified against the actual native binary's build
+  config). Same Dart API (`FFmpegKit`, `FFprobeKit`, `MediaInformation`),
+  same codecs this app actually uses (mp3/opus/vorbis), same 16KB page
+  alignment. ~22MB smaller per arm64 ABI as a side effect, not the
+  reason. See `docs/adr/0012-offline-dsp.md`.
+- Playback now actually reads the episode audio cache Campaign 1 built.
+  `playWork` streamed `work.sourceUrl` unconditionally through 8a1af19 —
+  the downloaded/archived file existed to feed transcription and was
+  never consulted for playback itself. `PlayerController` now prefers a
+  local file (when one exists) over the network URL; per-feed speed,
+  skip-intro/outro, smart resume, the sleep timer, and Up Next all read
+  the same position/settings rows regardless of source, proven by test.
+  Eviction now means something for playback too: delete the file, the
+  next play streams; download it again, the next play reads it back.
+- A standalone "Download" action on each audio episode's menu — the
+  second door onto disk that doesn't require requesting a transcript,
+  through the same one consent dialog transcribe already uses. A quiet
+  indicator marks a row already downloaded; the action itself
+  disappears once one exists. Auto-download stays unwired on purpose
+  (Campaign 5's verdict) — this is an explicit tap, always.
+- Offline DSP: trim silence & even out volume, on downloaded episodes,
+  on this device. A conservative silenceremove (only silences over
+  1.5s, shrunk to 0.5s — a natural pause is never touched) chained with
+  single-pass loudnorm to the podcast-standard -16 LUFS. Streaming
+  playback is never touched — this only ever applies to an episode
+  that has actually landed on disk, and only right after it downloads:
+  a per-feed toggle (default: the household setting) turns it on,
+  "processed on download" is the whole promise, and there is no
+  separate manual "process now" action. A failed encode or a sanity
+  check that doesn't like the result leaves the original completely
+  untouched — nothing is ever promoted until it's verified. The parent
+  dashboard's lifetime stats gain a "time saved" line, the same
+  positive-framing law as every other line there: silent when zero.
+  See `docs/adr/0012-offline-dsp.md`.
+- Audiobooks: a folder IS the book. Pick a folder's worth of audio files
+  (MP3/M4A/M4B/OGG/OPUS/FLAC), natural-sorted (the classic "1, 2, 10"
+  problem) into playback order, an editable guessed title, copied into
+  app storage — every picked file is copied, never referenced in place;
+  `docs/adr/0013-audiobooks-are-a-door.md` records exactly why (Android's
+  `file_picker` gives no durable, permissioned path to reference, and
+  this app ships no desktop build to reference from either). M4B/M4A
+  chapter marks are read straight from the file's own chpl atom (a
+  minimal pure-Dart box parser, verified against ffmpeg's own reader,
+  never a general MP4 parser) and shown in a Chapters drawer; a file
+  with no chapter atom of its own — every plain MP3 included — is simply
+  one chapter. Playback runs through the exact same player every podcast
+  episode already uses: gapless auto-advance across a book's files (the
+  underlying audio engine's own playlist support, not new app code),
+  the shared sleep timer, smart resume, and Up Next queue, a per-book
+  speed override, and a one-touch bookmark through the same Captures
+  store the study crown already ships. The library tile shows New/
+  Started/Finished and a coarse (file-count, not time-precise) progress
+  bar. A transcribed audiobook's read↔listen handoff — this campaign's
+  own stretch goal — was investigated and NOT built; the ADR names three
+  structural reasons rather than forcing a shortcut.
+
+## 1.2.0 (2026-08-14) — build 2006
+
+The first APK to carry the neural voice — and it carries it MIT-clean.
+1.1.0's sentence-paced speak mode and the Skein lane ship to Android for
+the first time here too (1.1.0 released as a PWA only, its APK held back
+precisely because of the licensing question this release resolves).
+
+### Changed
+
+- Speak mode's neural voice rung moves from sherpa-onnx (Piper voices) to
+  Supertonic, over `flutter_onnxruntime`. Supertonic needs no phonemizer —
+  the model consumes raw character indices — so the shipped APK is MIT-clean
+  end to end; sherpa-onnx's TTS path statically bundled espeak-ng
+  (GPL-3.0), which meant the previous rung would have made any APK built
+  with it a GPL-3.0 binary the moment it shipped. See
+  `docs/adr/0007-the-voice-goes-mit.md` for the full accounting.
+- The starter voice registry entry moves from `piper-en-libritts-r-medium`
+  (23.4 MB, CC-BY-4.0 + GPL-3.0) to `supertonic-en-m1` (~263.5 MB,
+  OpenRAIL-M) — a real, honest size increase the models screen states
+  plainly before any download starts. The voice's minimum device tier
+  moves from T1 to T2, matching VISION's own freedom-of-compute ladder.
+- `sherpa_onnx` and its per-platform native packages are removed from
+  `app/pubspec.yaml`.
+
+### Added
+
+- `SupertonicVoiceLayout` (`packages/ml_runtime`) — names which downloaded
+  filename plays which role for a voice whose files ship loose (no archive
+  to extract), the same "data, not code" contract `VoiceArchiveLayout`
+  gives an archived voice.

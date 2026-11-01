@@ -1,0 +1,262 @@
+import 'package:flutter/material.dart';
+import 'package:openhearth_design/openhearth_design.dart';
+
+import '../../db/database.dart';
+import '../episodes/episode_actions.dart';
+import '../reader/reader_doors.dart';
+import '../shared/capped_body.dart';
+import '../works/work_menu.dart';
+import '../works/work_open.dart';
+import '../works/work_row.dart';
+import 'player_controller.dart';
+
+/// The Queue tab: what's queued, in play order, in the same rows as every
+/// other list, with a visible Remove and a drag handle on each row. A tab root, so it has no back arrow; the mini
+/// bar's queue button switches to it.
+class QueueScreen extends StatefulWidget {
+  final AppDatabase db;
+  final Profile profile;
+
+  /// The shell's player. Finishing an episode takes it off the queue while
+  /// this tab may be the one on screen, so a change of what's playing
+  /// reloads the list.
+  final PlayerController? player;
+
+  /// Opens History, which the bar shows as a visible door: the queue is
+  /// what plays next, history is what played.
+  final Future<void> Function()? onOpenHistory;
+
+  /// What the rows can do (queue, download, mark played) and what they
+  /// know (artwork, downloads); the shell's own, so the menu matches
+  /// Latest's. Null builds a bare one over [player].
+  final EpisodeActions? actions;
+
+  /// How a row opens a text or a transcript.
+  final ReaderDoors? readerDoors;
+
+  const QueueScreen(
+      {super.key,
+      required this.db,
+      required this.profile,
+      this.player,
+      this.onOpenHistory,
+      this.actions,
+      this.readerDoors});
+
+  @override
+  State<QueueScreen> createState() => _QueueScreenState();
+}
+
+class _QueueScreenState extends State<QueueScreen> {
+  List<QueueEntry>? _entries;
+  WorkListState _rowState = WorkListState.empty;
+
+  int? _playingId;
+  int _queueRevision = 0;
+
+  final _undo = OhUndoController();
+
+  late final EpisodeActions _actions = widget.actions ??
+      EpisodeActions(
+          db: widget.db, profileId: widget.profile.id, player: widget.player);
+
+  late final WorkDoors _doors = WorkDoors(
+      db: widget.db,
+      profileId: widget.profile.id,
+      readerDoors: widget.readerDoors ?? ReaderDoors(player: widget.player),
+      actions: _actions);
+
+  @override
+  void initState() {
+    super.initState();
+    _playingId = widget.player?.current?.id;
+    _queueRevision = widget.player?.queueRevision ?? 0;
+    widget.player?.addListener(_onPlayer);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    widget.player?.removeListener(_onPlayer);
+    _undo.dispose();
+    super.dispose();
+  }
+
+  // The player notifies on every tick; only a change of work, or the
+  // player taking a finished episode off the queue, can have moved it.
+  // The last entry ends with nothing new playing, so the work alone
+  // isn't enough (1.6.0: its row stayed until the tab was left).
+  void _onPlayer() {
+    final id = widget.player?.current?.id;
+    final revision = widget.player?.queueRevision ?? 0;
+    if (id == _playingId && revision == _queueRevision) return;
+    _playingId = id;
+    _queueRevision = revision;
+    _load();
+  }
+
+  Future<void> _load() async {
+    final entries = await widget.db.queueDao.queueEntriesOf(widget.profile.id);
+    final rowState = await WorkListState.load(widget.db, widget.profile.id,
+        entries: [for (final e in entries) (work: e.work, episode: e.episode)]);
+    if (!mounted) return;
+    _actions.forgetArtwork();
+    setState(() {
+      _entries = entries;
+      _rowState = rowState;
+    });
+  }
+
+  /// Takes [e] off the queue at once, with an Undo that puts it back in
+  /// the same place.
+  Future<void> _remove(QueueEntry e) async {
+    final dao = widget.db.queueDao;
+    final profileId = widget.profile.id;
+    final place = _entries?.indexOf(e) ?? 0;
+    await dao.remove(profileId: profileId, workId: e.work.id);
+    await _load();
+    _undo.show(
+      message: 'Removed from Queue',
+      onUndo: () async {
+        await dao.playLast(
+            profileId: profileId,
+            workId: e.work.id,
+            nowMs: DateTime.now().millisecondsSinceEpoch);
+        await dao.reorder(
+            profileId: profileId, workId: e.work.id, newPosition: place);
+        if (mounted) await _load();
+      },
+    );
+  }
+
+  Future<void> _reorder(int oldIndex, int newIndex) async {
+    final entries = _entries;
+    if (entries == null) return;
+    if (newIndex > oldIndex) newIndex -= 1; // ReorderableListView's own law
+    final moved = entries[oldIndex];
+    await widget.db.queueDao.reorder(
+        profileId: widget.profile.id,
+        workId: moved.work.id,
+        newPosition: newIndex);
+    await _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = _entries;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Queue'),
+        actions: [
+          OhBarActions(children: [
+            if (widget.onOpenHistory case final open?)
+              OhBarAction(
+                key: const Key('queue-history'),
+                icon: Icons.history,
+                label: 'History',
+                tooltip: 'History',
+                onPressed: () async {
+                  await open();
+                  // Playing from History may have moved the queue.
+                  await _load();
+                },
+              ),
+          ]),
+        ],
+      ),
+      bottomSheet: OhUndoBar(controller: _undo),
+      body: CappedBody(child: switch (entries) {
+        null => const Center(child: CircularProgressIndicator()),
+        [] => const Center(child: Text('Nothing queued yet.')),
+        _ => ReorderableListView.builder(
+            itemCount: entries.length,
+            onReorder: _reorder,
+            // The row's own handle drags at once; a long press anywhere
+            // on the row drags too. No second, default handle.
+            buildDefaultDragHandles: false,
+            itemBuilder: (_, i) => ReorderableDelayedDragStartListener(
+              key: Key('queue-item-${entries[i].work.id}'),
+              index: i,
+              child: _row(entries[i], i),
+            ),
+          ),
+      }),
+    );
+  }
+
+  Widget _row(QueueEntry e, int index) {
+    final work = e.work;
+    final episode = e.episode;
+    final entry = (work: work, episode: episode);
+    final isAudio = episode?.enclosureUrl != null || work.kind == 'audiobook';
+    return WorkRow(
+      downloads: _actions.downloader,
+      work: work,
+      episode: episode,
+      facts: WorkRowFacts.of(work, episode, _rowState,
+              downloaded: episode != null && _actions.isDownloaded(episode))
+          .withoutQueued(),
+      showTitle: e.feedTitle,
+      artwork: episode == null ? null : _actions.artworkFor(episode),
+      onTap: () async {
+        final removal =
+            await _doors.open(context, entry, showTitle: e.feedTitle);
+        await _load();
+        // Removed from its page: reload once the Undo goes.
+        removal?.then((_) => mounted ? _load() : null);
+      },
+      player: widget.player,
+      second: _actions.listenButton(entry,
+          feedLang: _rowState.feedLangs[episode?.feedId]),
+      onPlay: isAudio && widget.player != null
+          ? () async {
+              await _doors.play(work);
+              await _load();
+            }
+          : null,
+      onRead: _doors.canRead(entry)
+          ? () async {
+              await _doors.readFromRow(context, entry);
+              await _load();
+            }
+          : null,
+      menuBuilder: (_) => workMenuItems(_actions, entry,
+          transcript: _rowState.transcriptOf(work.id),
+          sourceLang: _rowState.sourceLangOf(entry), extras: [
+        PopupMenuItem(
+            key: Key('queue-remove-${work.id}'),
+            value: 'remove',
+            child: const Text('Remove from Queue')),
+      ]),
+      onMenu: (choice) async {
+        if (choice == 'remove') return _remove(e);
+        await _actions.handleShared(context, choice, entry,
+            showTitle: e.feedTitle);
+        await _load();
+      },
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            key: Key('queue-row-remove-${work.id}'),
+            tooltip: 'Remove from Queue',
+            icon: const Icon(Icons.close),
+            onPressed: () => _remove(e),
+          ),
+          ReorderableDragStartListener(
+            index: index,
+            child: SizedBox(
+              key: Key('queue-handle-${work.id}'),
+              width: 48,
+              height: 48,
+              child: Semantics(
+                label: 'Drag to reorder',
+                child: const Icon(Icons.drag_handle),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

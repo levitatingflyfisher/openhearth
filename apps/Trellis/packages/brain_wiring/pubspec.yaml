@@ -1,0 +1,18 @@
+name: brain_wiring
+description: "The LLM seam, distillation, and discourse layer \u2014 domovoi Brain\
+  \ tiers with explicit user-pinned selection, a BYOK Anthropic Brain over an injectable\
+  \ HTTP seam, the transcript-to-.ohcourse Distiller (strict-parser invariant, bounded\
+  \ repair loop), suggestion-only free-recall grading, and provenance stamping. Pure\
+  \ Dart."
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.10.7
+dependencies:
+  domovoi:
+    path: ../../../../packages/domovoi
+  study_core:
+    path: ../study_core
+dev_dependencies:
+  test: ^1.25.0
+resolution: workspace

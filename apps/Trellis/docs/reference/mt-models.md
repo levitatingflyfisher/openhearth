@@ -1,0 +1,815 @@
+# Translation models — the licensing record (ADR-0008)
+
+A downloadable translation pair is a data entry in `ml_runtime`'s
+`ModelRegistry` (`packages/ml_runtime/lib/src/registry.dart`,
+`ModelRegistry.starter()`), not code — adding a pair never touches the
+Marian engine. This file is the verbatim license record for the pair
+shipped, so the choice can be checked rather than trusted, following
+`tts-voices.md`'s own convention for exactly this situation.
+
+## Starter pair: `opus-mt-en-es`
+
+**Chosen (ADR-0008).** `onnx-community/opus-mt-en-es` on Hugging Face —
+Xenova/onnx-community's ONNX conversion of `Helsinki-NLP/opus-mt-en-es`
+(a Marian transformer, trained on OPUS/Tatoeba-Challenge data), int8
+quantized.
+
+- Registry id: `opus-mt-en-es`
+- Source: `https://huggingface.co/onnx-community/opus-mt-en-es`
+  (verified 2026-08-14/15 — the file list and `config.json` were read
+  directly rather than assumed; see below)
+- Direction: English -> Spanish only. The registry's `langs` field names
+  the TARGET language (`{'es'}`).
+- Total size: 248,686,982 bytes (~248.7 MB) across four files, all
+  downloaded directly and hashed locally 2026-08-14/15:
+
+| File | Bytes | sha256 |
+|---|---|---|
+| `onnx/encoder_model_quantized.onnx` | 52,875,078 | `13ec84a3afebfe97cae004a5f39881ea38541308514ec26c18a0b807476d6fba` |
+| `onnx/decoder_model_merged_quantized.onnx` | 193,290,224 | `832c4e0c1630a401f3115f0fcb08922f473b7f4996a5371d02ff880dc55f9399` |
+| `source.spm` | 801,636 | `4dd547c24816a335e7b0b2e63376a8f1b3cbfc671eda5ab808dd44fdadaa8791` |
+| `vocab.json` | 1,720,044 | `b074b4cca0036ade5a39ea97faabd534e1015482c480fc2cb02c6481983eb163` |
+
+No archive to extract — every file above ships loose and is downloaded,
+sha256-verified, and promoted independently, the same per-file law
+Supertonic's voice files and whisper's single model file already follow;
+`MarianModelLayout` names which file plays which role.
+
+**Deliberately not registered:** `target.spm` (825,924 bytes, present in
+the same upstream repo). It tokenizes text for the OTHER direction
+(es->en decode input) — this engine only ever encodes English and decodes
+by reversing the joint `vocab.json`, so nothing in the shipped code ever
+opens it.
+
+### Repo file list, as actually found (2026-08-14)
+
+The campaign spec that started this work said "VERIFY the repo's actual
+file list... do not assume." What was found by listing the repo directly
+(`huggingface_hub.HfApi().model_info(..., files_metadata=True)`): the
+`onnx/` subfolder ships nine quantization variants of the encoder
+(`_fp16`, `_int8`, `_uint8`, `_q4`, `_q4f16`, `_bnb4`, plus the plain
+`_quantized` alias used here) and eleven of the decoder, plus a separate
+`decoder_with_past_model*` family (the pre-merge two-graph export this
+campaign does NOT use). `encoder_model_quantized.onnx` and
+`decoder_model_merged_quantized.onnx` are the exact filenames the spec
+named; only their byte sizes were a guess (see ADR-0008 for the ~113MB
+vs ~246MB gap).
+
+### `config.json` facts load-bearing for the engine
+
+Read directly from the repo (2026-08-14), not assumed:
+
+```
+"bos_token_id": 0, "eos_token_id": 0, "pad_token_id": 65000,
+"decoder_start_token_id": 65000, "vocab_size": 65001, "d_model": 512,
+"encoder_layers": 6, "decoder_layers": 6
+```
+
+`tokenizer_config.json` confirms `"separate_vocabs": false` — a single
+joint `vocab.json` covers both languages' pieces, exactly as the spec
+anticipated.
+
+### LICENSE — the spec's assumption was backwards, corrected here
+
+The originating spec expected "License: Apache-2.0 (HF card) / weights
+CC-BY-4.0 upstream." Reading both cards directly (2026-08-15) found the
+opposite pairing:
+
+**`onnx-community/opus-mt-en-es`'s own model card** (the repo these
+exact files are downloaded from) — YAML frontmatter, fetched
+2026-08-15 from
+`https://huggingface.co/onnx-community/opus-mt-en-es/raw/main/README.md`:
+
+```
+license: cc-by-4.0
+```
+
+**`Helsinki-NLP/opus-mt-en-es`'s own model card** (the ORIGINAL model
+this ONNX export was converted from) — YAML frontmatter, fetched
+2026-08-15 from
+`https://huggingface.co/Helsinki-NLP/opus-mt-en-es/raw/main/README.md`:
+
+```
+license: apache-2.0
+```
+
+Neither repo carries a separate `LICENSE` file (`onnx-community/opus-mt-
+en-es/resolve/main/LICENSE` returns 404). The registry entry's
+`licenses` field names `CC-BY-4.0` — the license the repo actually
+hosting the downloaded bytes declares for them. The upstream
+Apache-2.0 claim is recorded here, verbatim, for completeness and in
+case a future maintainer needs to reason about the original weights
+rather than this specific ONNX conversion.
+
+---
+
+## Campaign 8 "Babel widens" — Phase 0 verification (2026-08-15)
+
+The founding-tweet flow (English episode -> whisper transcript -> en->X
+translation -> SPOKEN in X) makes the target language a parameter. This
+section is the verbatim license/size/hash record for every pair
+evaluated, per the spec's priority order (es shipped, de, pt, ru, ja,
+zh) — including the pairs NOT shipped, and why, since a gap that isn't
+recorded is a gap that gets rediscovered the hard way.
+
+### Verification method: a validated zero-download pinning path
+
+Downloading and hashing a ~250MB ONNX pair per candidate (six pairs,
+twelve files, ~1.5GB) to VERIFY a hash before deciding whether to ship
+it is wasteful when Hugging Face's own tree API already carries the
+answer. Before trusting it, it was checked against the already-shipped
+`opus-mt-en-es` entry's own ground truth (real local download, real
+local sha256, from the original ADR-0008 pass):
+
+```
+GET https://huggingface.co/api/models/onnx-community/opus-mt-en-es/tree/main/onnx?recursive=1
+```
+
+For `onnx/encoder_model_quantized.onnx`, the API returned `size:
+52875078` and `lfs.oid: 13ec84a3afebfe97cae004a5f39881ea38541308514ec26c18a0b807476d6fba` —
+an EXACT match, digit for digit, to the pinned registry entry's
+independently-downloaded-and-hashed values. Re-confirmed a second and
+third time by downloading the actual `de`, `ru`, `zh`, and `jap`/`jap-en`
+encoder+decoder pairs later in this pass (for the decoder-trap re-probe
+and the real-translation quality checks below) and diffing their local
+`sha256sum` against the tree API's `lfs.oid` — three-for-three exact
+matches. `size`/`lfs.oid` from this endpoint is therefore a trustworthy
+substitute for a full download when the goal is pinning a hash, not
+running the model. Small files that don't cross Hugging Face's LFS
+threshold (`source.spm`, `vocab.json` — under ~2.7MB in every pair
+checked) carry no `lfs` block at all and were downloaded directly and
+hashed locally, same as the original es pass.
+
+### Shipped pairs
+
+All four below share the exact architecture family as `opus-mt-en-es`
+(`config.json`: `architectures: ["MarianMTModel"]`, 6 encoder + 6
+decoder layers, `d_model: 512`, `separate_vocabs: false`) and the exact
+merged-decoder ONNX export shape (`onnx/decoder_model_merged_quantized.onnx`
+with the same 24 `past_key_values.*`/`present.*` input/output names and
+one `optimum::if` node keyed on `use_cache_branch`) — verified by
+downloading the `de` pair's own encoder+decoder graphs and inspecting
+them with `onnx.load` (not assumed from the config match alone).
+
+#### `opus-mt-en-de` / `opus-mt-de-en`
+
+Source: `https://huggingface.co/onnx-community/opus-mt-en-de` (forward)
+and `https://huggingface.co/onnx-community/opus-mt-de-en` (reverse).
+License: `cc-by-4.0` (both repos' own README frontmatter, fetched
+2026-08-15) — upstream `Helsinki-NLP/opus-mt-en-de` also declares
+`cc-by-4.0`; `Helsinki-NLP/opus-mt-de-en` declares `apache-2.0` (the two
+directions' upstream originals carry DIFFERENT licenses from each
+other — recorded verbatim, not reconciled, following the es entry's own
+precedent of naming the bytes-hosting repo's license as the one that
+governs).
+
+| Pair | File | Bytes | sha256 |
+|---|---|---|---|
+| en-de | `onnx/encoder_model_quantized.onnx` | 49,342,278 | `94ae6a9149aca29ef31a58bb8ccc1c3df3720840caef890ccc6cde73c94cb0f4` |
+| en-de | `onnx/decoder_model_merged_quantized.onnx` | 175,598,624 | `492004d70327f4552fbddba033f8d8ce946edb87b66cbf8f9a7b41d14fe683cc` |
+| en-de | `source.spm` | 768,489 | `678f2a1177d8389f67b66299762dcc4fc567e89b07e212ba91b0c56daecf47ce` |
+| en-de | `vocab.json` | 1,389,436 | `d5acea957b265a78554999144459c5e391e0df525864edc8287bc090290baa44` |
+| de-en | `onnx/encoder_model_quantized.onnx` | 49,342,278 | `3e7b95246cf1885b5c6c123a36818a417c3ef6f500d4c17e030fef427fff7a74` |
+| de-en | `onnx/decoder_model_merged_quantized.onnx` | 175,598,624 | `d789d6a132d540fa40d6fa5901c3ba1e6209c69bf201ffef54f73833fa9b5a6c` |
+| de-en | `source.spm` | 796,845 | `bbd1f495eea99c8e21ae086d9146e0fa7b096c3dfdd9ba07ab8b631889df5c9b` |
+| de-en | `vocab.json` | 1,389,436 | `d5acea957b265a78554999144459c5e391e0df525864edc8287bc090290baa44` |
+
+(`en-de`'s own `target.spm` and `de-en`'s own `source.spm` are the same
+German tokenizer, byte-for-byte — hashes cross-check exactly, confirming
+the two repos are genuinely a matched forward/reverse pair. Neither
+`target.spm` is registered, same reasoning as the es entry: this engine
+only ever encodes the source side and decodes by reversing the joint
+`vocab.json`.)
+
+**Quality, verified with real inference** (Python, real ONNX Runtime,
+the frozen-cross-attention-KV loop below): fluent, idiomatic German out
+for all four standard test sentences — `"Hello, world!"` ->
+`"Hallo, Welt!"`; `"I would pay for a podcast player that automatically
+translates episodes into other languages."` -> `"Ich würde für einen
+Podcast-Player bezahlen, der automatisch Episoden in andere Sprachen
+übersetzt."` On par with the shipped es pair. One general Marian
+base-model quirk observed on a *two-sentence* input fed as one string
+(`"Good morning. How are you today?"` -> `"Wie geht es dir heute?"`,
+dropping the greeting): this is very likely a probe artifact, not a
+model defect — the probe script fed both sentences through one
+`encode()` call, but the shipped app always calls `translate()` once per
+`core.splitSentences`-split sentence, so a multi-sentence string never
+reaches the real decode loop this way in production. Recorded rather
+than asserted as a genuine defect, since it wasn't isolated further.
+
+#### `opus-mt-en-ru` / `opus-mt-ru-en`
+
+Source: `https://huggingface.co/onnx-community/opus-mt-en-ru` /
+`.../opus-mt-ru-en`. License: `cc-by-4.0` on both onnx-community repos;
+upstream `Helsinki-NLP/opus-mt-en-ru` is `apache-2.0`,
+`Helsinki-NLP/opus-mt-ru-en` is `cc-by-4.0`.
+
+| Pair | File | Bytes | sha256 |
+|---|---|---|---|
+| en-ru | `onnx/encoder_model_quantized.onnx` | 51,603,782 | `b8b4f72528c0da92e579af8a739f97fa2f792d73527ba2fee786fa7286c4055b` |
+| en-ru | `onnx/decoder_model_merged_quantized.onnx` | 186,923,812 | `5d15c48566e60dcaa5af7422bcceca24ccc8f3eaa8f1b3aedc5d6170e6c232f3` |
+| en-ru | `source.spm` | 802,781 | `16bebef1389a0b8ab452772c4e35b9e605e5713f8ac7baa71ca701394eaa086d` |
+| en-ru | `vocab.json` | 2,726,796 | `5cf0d95d930d8d3e783c9e2f46a72f08b43a18060dab4ddefbcb66a733efedcb` |
+| ru-en | `onnx/encoder_model_quantized.onnx` | 51,603,782 | `fdd4d1de9cb02feaae8bc892e0e21b1bfd1741fa43a2895d471ee5f53ae260c4` |
+| ru-en | `onnx/decoder_model_merged_quantized.onnx` | 186,923,812 | `0fef11505dc0564d0d6d54e37529d7ba949826fe19fd7193052610989fccbf28` |
+| ru-en | `source.spm` | 1,080,169 | `745998e51ba5b058e38b7ac7765c25c43ed5c1c39cc92b27163b9b2e323c9d7c` |
+| ru-en | `vocab.json` | 2,726,796 | `5cf0d95d930d8d3e783c9e2f46a72f08b43a18060dab4ddefbcb66a733efedcb` |
+
+**Quality, verified with real inference:** fluent Cyrillic out —
+`"Hello, world!"` -> `"Привет, мир!"`; `"The quick brown fox..."` ->
+`"Быстрый коричневый лис прыгает через ленивую собаку."` One coined
+compound (`"подкастист"` for "podcast player" in the founding-tweet
+sentence) — an acceptable MT neologism, not a decode failure. On par
+with es/de.
+
+#### `opus-mt-en-zh` / `opus-mt-zh-en`
+
+**Update, Phase 3 (2026-08-15): `opus-mt-en-zh` (English -> Chinese) is
+NOT registered — evaluated, translation quality is real, but demoted for
+a rendering reason found downstream of this section, not a quality one.**
+`opus-mt-zh-en` (Chinese -> English) ships unaffected; its output is
+Latin text, so the finding below does not touch it. See "Phase 3:
+en-zh demoted — a display gap, not a translation gap" further down this
+file for the full account; this section is kept as the unmodified
+Phase 0 verification record (pins, quality samples) for both directions,
+since both were real, checked findings even though only one shipped.
+
+Source: `https://huggingface.co/onnx-community/opus-mt-en-zh` /
+`.../opus-mt-zh-en`. License: `cc-by-4.0` on both onnx-community repos;
+upstream `Helsinki-NLP/opus-mt-en-zh` is `apache-2.0`,
+`Helsinki-NLP/opus-mt-zh-en` is `cc-by-4.0`. **No `tc-big` variant
+exists for this pair** — `Helsinki-NLP/opus-mt-tc-big-en-zh` and
+`.../opus-mt-tc-big-zh-en` both 401 (Hugging Face's unauthenticated
+"does not exist" response, confirmed against a known-nonexistent repo
+and a known-gated repo to disambiguate from an auth wall) — so the base
+model checked here IS the best clean-licensed option, not a fallback
+from a stronger one that was skipped.
+
+| Pair | File | Bytes | sha256 |
+|---|---|---|---|
+| en-zh | `onnx/encoder_model_quantized.onnx` | 52,875,078 | `cb02c542d2ab3010766031f3ce04e9041ffb6bd2df15caa7c41f3aead7cfe6dc` |
+| en-zh | `onnx/decoder_model_merged_quantized.onnx` | 193,290,224 | `c6fe901b5bae6235237f07ac0dfb421bf2a14aaaa02d4024bd1965be5b1d215e` |
+| en-zh | `source.spm` | 806,435 | `5775ddc9e3ff2fae91554da56468ad35ff56edaba870fea74447bc7234bfdaa8` |
+| en-zh | `vocab.json` | 1,747,795 | `22c957348eed495ee925afc40a36da3e387c8a34a734c8486967c2dca271613e` |
+| zh-en | `onnx/encoder_model_quantized.onnx` | 52,875,078 | `86b0dc5a1d5d8062583800654864aae1311fce2172bba80910d02020d3693577` |
+| zh-en | `onnx/decoder_model_merged_quantized.onnx` | 193,290,224 | `714881fafd326c8cb56bc6e3e542d1d106a5acf90e6abb71e20423ebf1b47875` |
+| zh-en | `source.spm` | 804,677 | `e27a3a1b539f4959ec72ea60e453f49156289f95d4e6000b29332efc45616203` |
+| zh-en | `vocab.json` | 1,747,906 | `08a119a1defd522fa047cb5e3bfe3e89633e96caa38ced0dc9cee7ef1021a011` |
+
+**Quality, verified with real inference — asymmetric, recorded
+honestly:**
+- **zh-en (Chinese -> English): excellent, on par with es/de/ru.**
+  `"你好，世界！"` -> `"Hello, world!"`; `"早上好，你今天怎么样？"` ->
+  `"Good morning. How are you today?"` — fully fluent and accurate on
+  every test sentence.
+- **en-zh (English -> Chinese): usable but noticeably less fluent —
+  ships LABELED, not silently.** `"I would pay for a podcast player
+  that automatically translates episodes into other languages."` ->
+  `"我会支付一个播客播放器的费用 自动将片段翻译成其他语言"` — correct
+  in substance (a native reader gets the meaning) but missing a
+  connective between the two clauses where natural Chinese wants one;
+  `"Hello, world!"` -> `"你好,世界! !"` doubles the terminal exclamation
+  mark. This matches the base (non-tc-big) OPUS-MT en-zh model's general
+  reputation as one of the weaker directions in the catalog absent a
+  `tc-big` alternative, which — confirmed above — doesn't exist for this
+  pair. Shipped anyway per the spec's own law ("a weaker pair ships
+  LABELED, it doesn't ship silently and it doesn't get hidden"): the
+  output is genuinely usable, just rougher than its siblings.
+
+### Phase 3: `en-zh` demoted — a display gap, not a translation gap
+
+Unlike `en-jap`/`jap-en` and `en-pt`/`pt-en` below, `en-zh`'s translation
+was never in question — Phase 0's own samples above are fluent enough to
+ship. What changed in Phase 3: the spec called for verifying CJK font
+rendering on the reader's own surfaces rather than assuming it, and that
+verification (`app/test/visual/cjk_font_golden_test.dart`, the same
+self-guarded `VISUAL_TOUR=1` golden convention `tour_golden_test.dart`
+uses) rendered the scroll-mode dual display showing a real Chinese
+translation, then the PNG was read directly.
+
+**The glyphs render as tofu boxes (□).** The app bundles only Lora and
+Nunito — Latin/Cyrillic Google Fonts with zero CJK coverage, which was
+expected. The actionable finding: this app has a real, established
+conformance law for exactly this situation. `fleet_conformance_test.dart`
+runs `FleetCheck.c7Fonts` for Trellis — every glyph the app's own UI
+prints must exist in its BUNDLED fonts' cmaps, precisely so rendering
+never depends on whatever font happens to be installed on a given
+device (`reader_prefs.dart`'s own comment: "never a system/unbundled
+face"). Two follow-up checks confirmed this isn't a false alarm:
+
+1. **`fontFamilyFallback` naming an installed system font made no
+   difference.** This development box has `google-noto-sans-cjk-vf-fonts`
+   installed (`fc-list` confirms it), and declaring it in
+   `fontFamilyFallback` on the reader's translated-line style still
+   rendered tofu, identically. Root cause, confirmed rather than
+   guessed: `flutter test`'s golden-render pipeline loads only
+   asset-bundled fonts — it never consults fontconfig/`fc-list`, so a
+   system-family name in `fontFamilyFallback` is a no-op there by
+   construction. The experiment doesn't prove a real device would also
+   show tofu; it proves this app's own C7 doctrine (verify from what the
+   app bundles, not what might be installed) is the only question this
+   harness — or, per the doctrine, this app — can actually answer.
+2. **Bundling a CJK font to close the gap the honest way was costed,
+   not assumed.** Downloaded `notofonts/noto-cjk`'s `Sans2.004` release
+   and measured its single-weight, single-region subset OTF directly:
+   `SubsetOTF/SC/NotoSansSC-Regular.otf` is 8,331,336 bytes (OFL-1.1,
+   verified from the archive's own `LICENSE` file — the same license
+   family as the bundled Lora/Nunito). `app/budgets.json`'s C3 ratchet
+   has 71,888,630 bytes of APK headroom against 68,465,362 measured —
+   3,423,268 bytes (~3.3MB) of remaining room. An 8.3MB single-region,
+   single-weight font does not fit; the full multi-region family this
+   project would eventually want is far larger. Not a rounding error —
+   demoted on a real number, not a guess.
+
+**Decision: `opus-mt-en-zh` is not registered.** `opus-mt-zh-en` (Chinese
+source, English output) is unaffected and ships — Latin text carries no
+glyph risk. A user who wants to READ Chinese output, not just hear it
+spoken, is the gap; Speak-in-Chinese itself was never blocked by this
+finding (the system voice speaks the stored text regardless of whether
+it renders legibly on screen), but shipping a "Show Chinese" toggle
+whose own display is unverified — after just proving it fails in the one
+environment that can be checked — repeats exactly the kind of "ships a
+control that doesn't really work" mistake this campaign's own Phase 1
+regression fixes (`reader_screen.dart`'s dead-toggle fix) exist to
+prevent. The library doc comment on `cjk_font_golden_test.dart` keeps
+the finding as a live regression guard, not just a one-time note: if a
+future pass bundles a CJK font and re-runs this golden clean, that's the
+signal `en-zh` (and Japanese import display, the second golden's case)
+can be reconsidered.
+
+### Evaluated, NOT shipped: `en-jap` / `jap-en` (Japanese)
+
+**Verdict: Japanese does not clear the bar for the Marian offline
+floor.** Per the spec's own pre-authorized fallback for exactly this
+outcome, the honest label is: **Japanese needs the household Brain
+(Phase 5); the on-device floor is not yet available.**
+
+What was checked, in order:
+
+1. **No `tc-big` export exists.** `Helsinki-NLP/opus-mt-tc-big-en-ja`
+   and `.../opus-mt-tc-big-ja-en` both 401 (don't exist). The only
+   direct bilingual pair on Hugging Face uses the legacy three-letter
+   code `jap`, not `ja`: `Helsinki-NLP/opus-mt-en-jap` /
+   `.../opus-mt-jap-en` — both `license: apache-2.0`. **No ONNX
+   conversion exists on the trusted `onnx-community` org at all** (its
+   49-repo `opus-mt` catalog, listed directly via the Hub API, has no
+   `en-jap`/`jap-en`/`en-ja`/`ja-en` entry). The one trusted-org ONNX
+   conversion found is on `Xenova` (the predecessor org to
+   `onnx-community`, same maintainer lineage, a "known quantizer" per
+   the fleet's trust ladder): `Xenova/opus-mt-en-jap` /
+   `.../opus-mt-jap-en`. Its own README carries no `license:`
+   frontmatter of its own (unlike every onnx-community repo above,
+   which self-declares `cc-by-4.0`) — it only names
+   `base_model: Helsinki-NLP/opus-mt-en-jap`, so the license recorded
+   here (`apache-2.0`) is INHERITED from the named upstream, a weaker
+   attestation than onnx-community's explicit self-declaration,
+   flagged honestly rather than silently treated as equivalent.
+
+   | Pair | File | Bytes | sha256 |
+   |---|---|---|---|
+   | en-jap | `onnx/encoder_model_quantized.onnx` | 43,312,542 | `4062a86cbec1d388e779294f07b784179d87a648c90771e94879b3a28cd96be7` |
+   | en-jap | `onnx/decoder_model_merged_quantized.onnx` | 50,550,704 | `084c7544b640eeea722b4858328f479d804236b916a2bec761442ff062726619` |
+   | en-jap | `source.spm` | 508,602 | `375cbed8885a6d369e0493acfc69a066010a86f98f9bac02430cbeb1726934a6` |
+   | en-jap | `vocab.json` | 1,734,978 | `62f7857585e3cd6150bb420830076edede27caac6304778d8d81be41164e469d` |
+   | jap-en | `onnx/encoder_model_quantized.onnx` | 43,312,542 | `cd2b38cf4665f1ebad54dc3628cf0e9186ee951171a988644fcc25ef2d74822c` |
+   | jap-en | `onnx/decoder_model_merged_quantized.onnx` | 50,550,704 | `65895b7f5576bc71ddab2fb64b97c42ac21999d19c38a9b2dfa33317df701720` |
+   | jap-en | `source.spm` | 1,021,944 | `7d5ec21daca7dccb7a9df371b699def40ddd9d0c24cef855e44e31a39b96af55` |
+   | jap-en | `vocab.json` | 1,734,978 | `62f7857585e3cd6150bb420830076edede27caac6304778d8d81be41164e469d` |
+
+2. **Real inference, greedy decode, the same frozen-cross-attention-KV
+   loop that produces fluent es/de/ru/zh: pure `<pad>` output for 3 of
+   4 test sentences.** `config.json` for both repos names
+   `"bad_words_ids": [[46275]]` (46275 IS the model's own
+   `pad_token_id`/`decoder_start_token_id`) — a field NONE of the
+   shipped pairs' configs carry. Step-1 logits confirmed why: the pad
+   token's logit was exactly `0.0` while every other candidate scored
+   -5 to -7, so unmasked greedy argmax always picks it and the decode
+   collapses immediately. This is upstream's OWN documented awareness
+   that the export is fragile without logit masking, not a bug in this
+   campaign's probe.
+3. **Masking the pad token out of the argmax candidate set (matching
+   `bad_words_ids`) fixes the collapse but not the translation.** Both
+   directions then produce grammatical-LOOKING but semantically
+   incoherent output: `"The quick brown fox jumps over the lazy dog."`
+   -> `"猛禽は,いの犬のようだ."` (word salad: "raptor... dog-like
+   thing"); Japanese->English produced Bible-register hallucinations
+   unrelated to the input (`"The salutation of into do do Gaius been
+   the mercy of Gaius."`) — a strong signal of a small, old,
+   religious-corpus-heavy training set (Tatoeba/JW300-era OPUS data),
+   consistent with the archaic `jap` ISO code marking this as one of
+   the earliest, least-revisited pairs in the Helsinki-NLP catalog.
+4. **`、` (U+3001, the ordinary Japanese comma) is not even in
+   `jap-en`'s `vocab.json`** — falls back to `<unk>` on real running
+   text, a second independent sign of a small/stale training
+   vocabulary.
+
+Both directions were tested with real ONNX Runtime inference, not
+inferred from reputation alone — the incoherence is observed, not
+assumed. Ship-strategy consequence: Japanese is the Phase 5 Brain-lane
+QUALITY path, per the spec's own design; Marian is not the floor for
+this language, and the app must say so rather than silently offering a
+translator that produces gibberish.
+
+### Evaluated, NOT shipped: `en-pt` / `pt-en` (Portuguese)
+
+No bilingual Marian pair — `tc-big` or base — has a **trusted-org**
+ONNX conversion. What exists, checked directly rather than assumed:
+
+- `Helsinki-NLP/opus-mt-tc-big-en-pt` exists upstream (200) with no
+  reverse `tc-big-pt-en`, and no ONNX conversion of it on
+  `onnx-community` or `Xenova` (neither org's catalog lists it).
+- `Helsinki-NLP/opus-mt-en-pt` / `.../opus-mt-pt-en` (the plain,
+  non-tc-big bilingual pair) do not exist at all (401 on both).
+- The only ONNX artifacts found on Hugging Face search
+  (`opus-mt-en-pt`, `tc-big-en-pt`) are individual-account repos
+  (`R4kSo1997/opus-mt-en-pt-onnx-int8`, `TigreGotico/opus-mt-en-pt-onnx`,
+  and similar) — fail the fleet's trust ladder (official orgs > known
+  quantizers > curated catalogs > avoid mirrors) outright; not
+  evaluated further.
+- **`onnx-community/opus-mt-en-ROMANCE` and `.../opus-mt-ROMANCE-en`
+  DO exist at a trusted org** and DO cover Portuguese — but as a
+  multi-target model selected by a language-directive token
+  (`>>pt<<`) prepended to the source text, not a dedicated bilingual
+  pair. Checked concretely, not assumed: `en-ROMANCE`'s `vocab.json`
+  carries 47 `>>xx<<`-style directive tokens including `>>pt<<`
+  (id present) — but real `sentencepiece` encoding of its own
+  `source.spm` (`sp.get_piece_size() == 32000`, no `>>`-prefixed piece
+  anywhere in that table) shreds a literal `">>pt<< Hello world"` into
+  `['▁>', '>', 'pt', '<', '<', '▁Hello', '▁world']` — meaningless
+  sub-word fragments, not the single directive token the model needs.
+  The real behavior (confirmed against how `MarianTokenizer` is
+  documented to work upstream) is a REGEX extraction of the `>>xx<<`
+  prefix BEFORE SentencePiece ever sees the rest of the text, with the
+  directive's id looked up directly in the 65,001-entry joint
+  `vocab.json` and prepended to the SentencePiece-encoded ids — a
+  second, separate mechanism this campaign's tokenizer/generation loop
+  (`packages/ml_runtime`, `marian_generation_loop.dart`) does not
+  implement. `MarianUnigramTokenizer`'s own constructor only indexes
+  `SpmPieceType.normal` pieces into `_scoreByPiece` — `userDefined`/
+  reserved pieces are deliberately excluded — so even a future
+  encoder-only fix would need a genuinely separate directive-token
+  path, not a vocabulary tweak. Also has no int8-quantized ONNX export
+  at all (only fp32/fp16, ~210-236MB per graph vs the ~50-190MB
+  quantized pairs above) — a second, independent reason this isn't a
+  drop-in swap.
+
+Recorded as a deferred gap, not a silent one: Portuguese has no Marian
+floor this pass. Phase 5's Brain lane is the honest path for it, same
+as Japanese, until either a trusted-org bilingual ONNX conversion
+appears or the multi-target directive-token mechanism gets built as its
+own feature.
+
+### The decoder-trap re-probe (ADR-0008's frozen-cross-attention-KV fix)
+
+Re-proven end to end with real ONNX Runtime inference on the `de` pair
+(chosen as the smallest fully-shipped pair after es) before writing any
+Dart: the exact same failure ADR-0008 documented for es reproduces
+byte-for-byte — `present.0.encoder.key` shape `(1, 8, 5, 64)` (real) on
+step 0, collapsing to `(0, 8, 1, 64)` (degenerate) on every cached step
+thereafter — and the same fix (freeze step 1's real
+`present.*.encoder.*` tensors, re-feed those exact values on every later
+step instead of the current step's own cached-branch output) produces
+fluent German on every test sentence. Graph structure inspected directly
+(`onnx.load`, not assumed): the `de` decoder graph carries the identical
+24 `past_key_values.*`/`present.*` input/output names and the same
+single `optimum::if` node keyed on `use_cache_branch` as the es graph.
+`ru`, `zh`, `en-jap`/`jap-en` were confirmed to share the SAME
+architecture signature via `config.json` (`MarianMTModel`, 6+6 layers,
+`separate_vocabs: false`) but were not independently graph-inspected —
+their real-inference translations above (fluent for ru/zh, incoherent
+for jap for unrelated reasons already explained) are themselves
+evidence the same fix applies, since a still-present frozen-KV bug would
+produce garbage regardless of translation-quality reputation. No
+`tc-big` ONNX export exists for either CJK pair (recorded above), so the
+spec's "and on one tc-big export" re-probe target has no artifact to
+test against — recorded as the reason, not skipped silently.
+
+### SentencePiece / CJK tokenizer coverage
+
+Real golden vectors were generated against the real `zh-en` and
+`jap-en` `source.spm` files (Chinese and Japanese SOURCE-side
+tokenization — the direction that actually needs whitespace-free
+segmentation, since the reverse `en-*` pairs tokenize English) using
+the real Python `sentencepiece` library, the same process as the
+original 25 es vectors. Result: **zero divergence** once one narrow,
+verified fix landed — the pure-Dart `MarianUnigramTokenizer`'s Viterbi
+encoder had no whitespace assumption baked into its design (confirmed:
+`normalize()` only collapses whitespace RUNS, never assumes one
+exists), but real CJK text exposed that the model's own normalizer
+folds Halfwidth-and-Fullwidth-Forms punctuation (U+FF01-U+FF5E — the
+fullwidth `！`/`？` every CJK IME emits) to plain ASCII before
+tokenizing, which the Dart encoder didn't do. This is a fixed
+arithmetic offset (`codepoint - 0xFEE0`), not the general 237KB NFKC
+charsmap ADR-0008 already declined to port — narrow enough to
+implement exactly, and load-bearing for CJK specifically since
+fullwidth ASCII punctuation is common in ordinary Japanese/Chinese
+text, unlike the rare decomposed-Latin-accent case the es fixture
+documents. Landed in `packages/ml_runtime/lib/src/marian_tokenizer.dart`
+(`_foldFullwidthAscii`), golden fixtures at
+`packages/ml_runtime/test/fixtures/marian_tokenizer_goldens_{zh,ja}.json`.
+The `ja` fixture is kept even though the `jap`/`ja` Marian pair does not
+ship (above) — it's the evidence that the tokenizer itself generalizes
+to CJK correctly; the `zh` fixture is the same evidence for the pair
+that DOES ship.
+
+### Registry design: `sourceLang` (Phase 1)
+
+`ModelSpec.langs` means the TARGET language a model produces (ADR-0008)
+— correct for `pickModel`'s generic `(task, tier, langHint)` selection,
+which ASR and TTS also use and which this campaign does not touch. It
+breaks for translation the moment more than one pair produces the SAME
+target: `de-en`, `ru-en`, and `zh-en` all carry `langs: {'en'}`, so
+`pickModel(translation, tier, langHint: 'en')` could not tell them
+apart and would silently fall through to the largest-`sizeBytes`
+tiebreak regardless of which language a work actually needs translated.
+Fix: a new `ModelSpec.sourceLang` field (the es entry gets
+`sourceLang: 'en'` added too, so the field is never half-populated) and
+a new `ModelRegistry.pickTranslationPair(tier, {sourceLang, targetLang})`
+that matches BOTH fields — `pickModel` itself is untouched, so every
+existing ASR/TTS caller (and the existing es translation call sites,
+migrated to the new method in the same pass) keeps its exact prior
+behavior.
+
+
+## Trellis 1.5.5: the English-first catalog (2026-10-25)
+
+Checked 2026-10-25. The two ONNX graphs per pair were pinned from Hugging
+Face's tree API (`lfs.oid` and `size`, the method validated above). The
+four small files per pair (`source.spm`, `vocab.json`, `config.json`,
+`tokenizer_config.json`) carry no `lfs` block, so they were downloaded
+(kilobytes to about 2.7 MB each) and hashed. Only one pair's weights were
+downloaded: Xenova `opus-mt-en-ROMANCE`, to run it. The local sha256 of
+both graphs matched the tree API.
+
+Every pair has 6 decoder layers, 8 heads, `d_model` 512 and
+`separate_vocabs: false`. The vocab size and the pad/decoder-start id
+differ per pair, from 58,100 (de) to 80,378 (it-en). That is why the loop
+now reads them. Xenova's configs carry `bad_words_ids: [[pad]]`;
+onnx-community's carry none.
+
+| Pair | Repo | MB | License on the ONNX card | Upstream Helsinki-NLP card | Target token |
+|---|---|---|---|---|---|
+| en->es | `onnx-community/opus-mt-en-es` | 248.7 | cc-by-4.0 (own card) | apache-2.0 |  |
+| en->de | `onnx-community/opus-mt-en-de` | 227.1 | cc-by-4.0 (own card) | cc-by-4.0 |  |
+| de->en | `onnx-community/opus-mt-de-en` | 227.1 | cc-by-4.0 (own card) | apache-2.0 |  |
+| en->ru | `onnx-community/opus-mt-en-ru` | 242.1 | cc-by-4.0 (own card) | apache-2.0 |  |
+| ru->en | `onnx-community/opus-mt-ru-en` | 242.3 | cc-by-4.0 (own card) | cc-by-4.0 |  |
+| zh->en | `onnx-community/opus-mt-zh-en` | 248.7 | cc-by-4.0 (own card) | cc-by-4.0 |  |
+| es->en | `Xenova/opus-mt-es-en` | 115.7 | none on card | apache-2.0 |  |
+| en->fr | `Xenova/opus-mt-en-fr` | 109.7 | none on card | apache-2.0 |  |
+| fr->en | `Xenova/opus-mt-fr-en` | 109.7 | none on card | apache-2.0 |  |
+| en->it | `Xenova/opus-mt-en-it` | 131.9 | none on card | apache-2.0 |  |
+| it->en | `Xenova/opus-mt-it-en` | 132.3 | none on card | apache-2.0 |  |
+| en->pt | `Xenova/opus-mt-en-ROMANCE` | 115.5 | none on card | apache-2.0 | `>>pt<<` |
+| pt->en | `Xenova/opus-mt-ROMANCE-en` | 115.5 | none on card | apache-2.0 |  |
+| en->nl | `Xenova/opus-mt-en-nl` | 117.8 | none on card | apache-2.0 |  |
+| nl->en | `Xenova/opus-mt-nl-en` | 117.8 | none on card | apache-2.0 |  |
+| ja->en | `Mitsua/elan-mt-bt-ja-en`, converted by Trellis (replaced `Xenova/opus-mt-ja-en`, 2026-11-11) | 97.0 | CC BY-SA 4.0 (own card) | n/a, not OPUS-MT |  |
+| ko->en | `Xenova/opus-mt-ko-en` | 115.8 | none on card | apache-2.0 |  |
+| en->zh | `Xenova/opus-mt-en-zh` | 115.7 | none on card | apache-2.0 | `>>cmn_Hans<<` |
+| en->ar | `Xenova/opus-mt-en-ar` | 113.9 | none on card | apache-2.0 | `>>ara<<` |
+| ar->en | `Xenova/opus-mt-ar-en` | 114.1 | none on card | apache-2.0 |  |
+| en->hi | `Xenova/opus-mt-en-hi` | 113.0 | none on card | apache-2.0 |  |
+| hi->en | `Xenova/opus-mt-hi-en` | 112.4 | none on card | apache-2.0 |  |
+| en->uk | `Xenova/opus-mt-en-uk` | 112.9 | none on card | apache-2.0 |  |
+| uk->en | `Xenova/opus-mt-uk-en` | 113.1 | none on card | apache-2.0 |  |
+| pl->en | `Xenova/opus-mt-pl-en` | 114.0 | none on card | apache-2.0 |  |
+| en->ja | `Mitsua/elan-mt-bt-en-ja`, converted by Trellis | 97.0 | CC BY-SA 4.0 (own card) | n/a, not OPUS-MT |  |
+
+Pt rides on the multi-target `en-ROMANCE` / `ROMANCE-en` models, with
+`>>pt<<` selecting the language. No bilingual pt ONNX export exists at a
+trusted org (see the Portuguese section above). The model can produce
+Brazilian or European forms; `>>pt_BR<<` exists but wasn't evaluated.
+
+**Not registered:**
+
+| Wanted | Why |
+|---|---|
+| en->ko | `Helsinki-NLP/opus-mt-tc-big-en-ko` exists upstream, but no ONNX conversion exists at onnx-community or Xenova. |
+| en->pl | No `opus-mt-en-pl`; `opus-mt-en-zlw` (West Slavic) exists upstream with no trusted ONNX conversion. |
+
+**Licenses.** OPUS-MT weights are CC-BY 4.0 (some upstream cards say
+apache-2.0). The Models screen's translation section carries the credit:
+"Translation models: OPUS-MT by Helsinki-NLP (University of Helsinki),
+licensed CC-BY 4.0. Converted to ONNX by Xenova and onnx-community."
+
+## Trellis 1.5.9: Xenova’s decoder for the six oldest pairs (2026-11-06)
+
+en-es, en-de, de-en, en-ru, ru-en and zh-en keep onnx-community’s
+encoder, `source.spm`, `vocab.json`, `config.json` and
+`tokenizer_config.json` at the commits in the table above. Their
+`decoder_model_merged_quantized.onnx` now comes from the matching
+`Xenova/opus-mt-<pair>` repo at a pinned commit, about 57 to 60 MB
+against 176 to 193 MB. A pair is now about 108 to 116 MB.
+
+The swap was accepted pair by pair after a 50-sentence greedy-decoding
+parity check against the old decoder: 90% to 98% identical outputs and
+chrF 98.6 to 99.9, every difference a fluent paraphrase. The method, the
+full table and the pins are in
+[ADR-0020](../adr/0020-translation-runs-on-device-verified.md). The
+license is unchanged: the same OPUS-MT weights (CC-BY 4.0), converted by
+Xenova, whose cards carry no license of their own, like the other
+Xenova pairs above.
+
+## English to Japanese: ElanMT-BT, converted by Trellis (2026-11-11)
+
+No OPUS-MT `en-ja` export exists (above), and the only en-ja ONNX
+exports on Hugging Face sit on individual accounts. ElanMT-BT
+(`Mitsua/elan-mt-bt-en-ja`, commit
+`02c48e7031386cd2d41974b0ff1aaf52f010c5fa`) is a Marian base model of the
+same shape as the OPUS-MT pairs, CC BY-SA 4.0, trained only on openly
+licensed text. Trellis converted it to the int8 ONNX pair the app runs,
+under ADR-0014's amendment of 2026-11-11. The recipe, pinned versions,
+file hashes and measured quality are in
+[convert-a-translation-model.md](../how-to/convert-a-translation-model.md).
+
+The two graphs are hosted as assets of the permanent Trellis release
+`models-enja-1`, which also keeps the licence text and the export
+recipe and is never deleted; the four small files come from the
+upstream commit.
+Credit on the Models screen: “English to Japanese: ElanMT-BT by ELAN
+MITSUA Project / Abstract Engine, under CC BY-SA 4.0, converted to ONNX by
+Trellis.”
+
+## Japanese to English: ElanMT-BT, converted by Trellis (2026-11-11)
+
+Japanese to English had one pair, `Xenova/opus-mt-ja-en`. It is replaced
+by ElanMT-BT (`Mitsua/elan-mt-bt-ja-en`, commit
+`539f80eb05306e27a166b45e4264c7fa2eb4de97`), converted the same way as
+English to Japanese above, so Japanese has one pair each way.
+
+Measured on 300 lines of NTREX-128 (Japanese source, English reference),
+both pairs as the int8 ONNX the app runs, scored with sacreBLEU 2.4.3:
+
+| Pair | BLEU | chrF |
+|---|---|---|
+| `opus-mt-ja-en` (before) | 13.32 | 42.05 |
+| `elanmt-bt-ja-en` (now) | 19.16 | 49.67 |
+
+The two graphs are assets of the permanent Trellis release
+`models-jaen-1` (encoder 35,890,766 bytes, sha256
+`cd4aba53f281351e20e708be365494f4c9f7cfcdbb64d4f498620b9c5cbb837f`;
+merged decoder 59,457,806 bytes, sha256
+`37f568860465ef6f164025640bbad3bf1af917df9ef617faa4056dba8719e189`),
+which also keeps the licence text and the export recipe and is never
+deleted. `source.spm`, `vocab.json` and `config.json` come from the
+upstream commit and are byte-identical to the English to Japanese
+pair's; only `tokenizer_config.json` differs (source ja, target en). The
+whole download is 97.0 MB, against 111.1 MB before. A phone that had
+the old pair prunes it at start-up, as for any spec the registry no
+longer names.
+
+The app's own generation loop is checked against these files by
+`app/test/reader/translation/marian_real_pair_ja_en_test.dart`, skipped
+unless `MARIAN_JA_EN_DIR` and `ORT_PYTHON` are set.
+
+Credit on the Models screen: “Japanese to and from English: ElanMT-BT by
+ELAN MITSUA Project / Abstract Engine, under CC BY-SA 4.0, converted to
+ONNX by Trellis.”
+
+## Trellis 1.6.13: more pairs (2026-11-12)
+
+The owner wants to pick any language to learn. This pass lists every
+existing OPUS-MT ONNX export with English on one end and a clean
+licence. Nothing was trained. Every pair is a published model, pinned.
+
+Checked 2026-11-12, by the method above. The two ONNX graphs were pinned
+from the tree API at a commit. The four small files were downloaded and
+hashed. Each pair was then run once for real: both graphs downloaded,
+their local sha256 checked against the pin (72 pairs tried, all 144
+graph checks matched), and three everyday sentences translated by a
+greedy loop shaped like the app’s (joint vocab, frozen cross-attention
+cache). The weights were
+deleted after the run.
+
+Every pair has 6 decoder layers and `separate_vocabs: false`. All but
+one have 8 heads and `d_model` 512. English to Turkish is a “tc-big”
+model with 16 heads and `d_model` 1024; the loop reads both from
+`config.json`, so it needs no code change.
+
+Some rows reuse a multi-language model under their own id: ROMANCE-en
+(ro, ca, gl to English), en-ROMANCE (en to ca, gl), bat-en (lt, lv to
+English), mul-en (hr, mk, eo, ml, sl to English) and en-mul (en to eo,
+ga). The store keeps files per id, so two such rows on one phone hold
+two copies. The en-ROMANCE and ROMANCE-en rows reuse the commits and
+hashes already pinned for pt; they matched.
+
+The mul-en and en-mul models cover hundreds of languages, many badly.
+A language was tried on them only when the model card's Tatoeba BLEU for
+that direction was 25 or more and no smaller model covers it. It was
+kept only when all three test sentences kept their meaning. Seven
+passed.
+
+| Pair | Repo | MB | License on the ONNX card | Upstream Helsinki-NLP card | Target token |
+|---|---|---|---|---|---|
+| af->en | `Xenova/opus-mt-af-en` | 107.6 | none on card | apache-2.0 |  |
+| en->af | `Xenova/opus-mt-en-af` | 107.6 | none on card | apache-2.0 |  |
+| cs->en | `Xenova/opus-mt-cs-en` | 113.1 | none on card | apache-2.0 |  |
+| en->cs | `Xenova/opus-mt-en-cs` | 113.1 | none on card | apache-2.0 |  |
+| da->en | `Xenova/opus-mt-da-en` | 109.2 | none on card | apache-2.0 |  |
+| en->da | `Xenova/opus-mt-en-da` | 109.2 | none on card | apache-2.0 |  |
+| fi->en | `Xenova/opus-mt-fi-en` | 110.0 | none on card | apache-2.0 |  |
+| en->fi | `Xenova/opus-mt-en-fi` | 115.6 | none on card | apache-2.0 |  |
+| hu->en | `Xenova/opus-mt-hu-en` | 113.1 | none on card | apache-2.0 |  |
+| en->hu | `Xenova/opus-mt-en-hu` | 113.0 | none on card | apache-2.0 |  |
+| id->en | `Xenova/opus-mt-id-en` | 104.8 | none on card | apache-2.0 |  |
+| en->id | `Xenova/opus-mt-en-id` | 104.8 | none on card | apache-2.0 |  |
+| sv->en | `Xenova/opus-mt-sv-en` | 106.5 | none on card | apache-2.0 |  |
+| en->sv | `Xenova/opus-mt-en-sv` | 106.5 | none on card | apache-2.0 |  |
+| vi->en | `Xenova/opus-mt-vi-en` | 103.6 | none on card | apache-2.0 |  |
+| en->vi | `Xenova/opus-mt-en-vi` | 103.6 | none on card | apache-2.0 | `>>vie<<` |
+| xh->en | `Xenova/opus-mt-xh-en` | 111.6 | none on card | apache-2.0 |  |
+| en->xh | `Xenova/opus-mt-en-xh` | 111.6 | none on card | apache-2.0 |  |
+| en->ro | `Xenova/opus-mt-en-ro` | 109.8 | none on card | apache-2.0 |  |
+| ro->en | `Xenova/opus-mt-ROMANCE-en` | 115.5 | none on card | apache-2.0 |  |
+| ca->en | `Xenova/opus-mt-ROMANCE-en` | 115.5 | none on card | apache-2.0 |  |
+| en->gl | `Xenova/opus-mt-en-ROMANCE` | 115.5 | none on card | apache-2.0 | `>>gl<<` |
+| gl->en | `Xenova/opus-mt-ROMANCE-en` | 115.5 | none on card | apache-2.0 |  |
+| et->en | `Xenova/opus-mt-et-en` | 109.1 | none on card | apache-2.0 |  |
+| lt->en | `Xenova/opus-mt-bat-en` | 109.4 | none on card | apache-2.0 |  |
+| lv->en | `Xenova/opus-mt-bat-en` | 109.4 | none on card | apache-2.0 |  |
+| tr->en | `Xenova/opus-mt-tr-en` | 113.0 | none on card | apache-2.0 |  |
+| en->tr | `onnx-community/opus-mt-tc-big-en-tr` | 533.7 | cc-by-4.0 (own card) | cc-by-4.0 |  |
+| th->en | `Xenova/opus-mt-th-en` | 114.1 | none on card | apache-2.0 |  |
+| hr->en | `Xenova/opus-mt-mul-en` | 114.5 | none on card | apache-2.0 |  |
+| mk->en | `Xenova/opus-mt-mul-en` | 114.5 | none on card | apache-2.0 |  |
+| eo->en | `Xenova/opus-mt-mul-en` | 114.5 | none on card | apache-2.0 |  |
+| ml->en | `Xenova/opus-mt-mul-en` | 114.5 | none on card | apache-2.0 |  |
+| sl->en | `Xenova/opus-mt-mul-en` | 114.5 | none on card | apache-2.0 |  |
+| en->eo | `Xenova/opus-mt-en-mul` | 114.5 | none on card | apache-2.0 | `>>epo<<` |
+| en->ga | `Xenova/opus-mt-en-mul` | 114.5 | none on card | apache-2.0 | `>>gle<<` |
+
+English to Turkish is large: about 534 MB, against about 110 MB for the
+others. It is the only clean export for that direction. The small
+`opus-mt-en-trk` (`>>tur<<`, 236 MB) scores 9.2 BLEU on newstest2016
+against tc-big's 23.4, so tc-big is pinned.
+
+Sample output. The en->X rows translate “Where is the train station?”,
+“I would like a cup of coffee, please.” and “My children are playing
+in the garden.” The X->en rows translate the same three sentences,
+written in X.
+
+| Pair | Sentence 1 | Sentence 2 | Sentence 3 |
+|---|---|---|---|
+| af->en | Where is the train station? | I would like a cup of coffee, please. | My children play in the garden. |
+| en->af | Waar is die treinstasie? | Ek wil graag 'n koppie koffie hê, asseblief | My kinders speel in die tuin. |
+| cs->en | Where's the train station? | I'd like a cup of coffee, please. | My kids are playing in the garden. |
+| en->cs | Kde je vlakové nádraží? | Dal bych si šálek kávy, prosím. | Moje děti si hrají na zahradě. |
+| da->en | Where's the train station? | I'd like a cup of coffee, please. | My kids are playing in the garden. |
+| en->da | Hvor er togstationen? | Jeg vil gerne have en kop kaffe, tak. | Mine børn leger i haven. |
+| fi->en | Where's the train station? | I'd like a cup of coffee, please. | My kids were playing in the garden. |
+| en->fi | Missä rautatieasema on? | Haluaisin kupin kahvia, kiitos. | Lapseni leikkivät puutarhassa. |
+| hu->en | Where's the train station? | I'll have a cup of coffee. | My kids are playing in the garden. |
+| en->hu | Hol van a vasútállomás? | Egy csésze kávét kérek. | A gyerekeim a kertben játszanak. |
+| id->en | Where's the train station? | I'd like a cup of coffee. | My kids are playing in the garden. |
+| en->id | Dimana stasiun kereta api? | Aku ingin secangkir kopi, tolong. | Anak-anakku bermain di kebun. |
+| sv->en | Where's the train station? | I'd like a cup of coffee, please. | My children play in the garden. |
+| en->sv | Var är tågstationen? | Jag vill ha en kopp kaffe, tack. | Mina barn leker i trädgården. |
+| vi->en | Where's the station? | I'll have a cup of coffee. | My kids are playing in the garden. |
+| en->vi | Ga tàu đâu? | Cho tôi một tách cà phê. | Con tôi đang chơi trong vườn. |
+| xh->en | Where is the railway station? | I would like a cup of coffee. | My children play in the garden. |
+| en->xh | Siphi isikhululo sikaloliwe? | Ndicela undinike ikomityi yekofu. | Abantwana bam badlala egadini. |
+| en->ro | Unde e gara? | Aş vrea o ceaşcă de cafea, vă rog. | Copiii mei se joacă în grădină. |
+| ro->en | Where's the station? | I'd like a coffee, please. | My kids are playing in the garden. |
+| ca->en | Where's the train station? | I'd like a coffee, please. | My kids play garden. |
+| en->gl | Onde está a estación de trenes? | Quero unha taza de café, por favor. | Os meus fillos están xogando no xardín. |
+| gl->en | Where's the train station? | I wanted a coffee, please. | My kids play in the garden. |
+| et->en | Where's the train station? | I'd like a cup of coffee, please. | My kids play in the garden. |
+| lt->en | Where's the train station? | I'd like a cup of coffee. | My children play in the garden. |
+| lv->en | Where's the railway station? | I'd like some coffee for a cup, please. | My children play in the garden. |
+| tr->en | Where's the train station? | I'd like a cup of coffee, please. | My kids are playing in the garden. |
+| en->tr | Tren istasyonu nerede? | Bir fincan kahve lütfen. | Çocuklarım bahçede oynuyor. |
+| th->en | Where's the train station? | One coffee please. | My kids are playing in the park. |
+| hr->en | Where's the railway station? | I'd like a cup of coffee, please. | My kids are playing in the garden. |
+| mk->en | Where's the train station? | I'd like a cup of coffee, please. | My kids are playing in the garden. |
+| eo->en | Where's the station? | I'd like a cup of coffee, please. | My kids are playing in the garden. |
+| ml->en | Where's the station on the train? | I need a cup of coffee. | My kids play in the garden. |
+| sl->en | Where's the train station? | I want a cup of coffee, please. | My kids are playing on the garden. |
+| en->eo | Kie estas la trenstacio? | Mi volas kafeon, bonvolu. | Miaj infanoj ludas en la ĝardeno. |
+| en->ga | Cáit é an stáisiún traenach? | Ba mhaith liom cupán caife, le do thoil. | Tá mo pháistí imirt sa ghairdín. |
+
+**Not registered:**
+
+| Wanted | Why |
+|---|---|
+| en->ca | Ran, then dropped by the lead: one of the three test sentences lost its meaning ("juntant", joining, for playing). |
+| en->et | Only on en-mul (`>>est<<`). Run for real: two of three sentences came out wrong (“rongivahemik”, “piirkonnas”). |
+| el, sq, sr, bs, bg, no, ga, zu, bn, mt, eu, be, is, ht, ms, he, hy, ka, ta, fo, ky, am, fy, az, lb ->en | Only on mul-en. Pinned and run for real; at least one of three sentences lost its meaning (for example “Where's the parking lot?” for Hebrew, “Where is the road to everlasting life?” for Azerbaijani). |
+| en->bg, el, mk, no, sq, zu, hr, sr, bs | Only on en-mul. Run for real; at least one sentence lost its meaning or the output was the wrong language (Norwegian came out as Danish). |
+| en->th, lt, lv, pl, he, sl, is, eu, be, cy | Only on en-mul, with card Tatoeba BLEU under 25 (th 2.2, lt 17.4, lv 20.4, pl 22.7, he 21.3). Not tried. |
+| co, ts, to, sm, an, ny, mg, ia, ie ->en | mul-en clears the BLEU bar, but no reliable test sentences could be written for a real run. Not tried. |
+| tr->en (tc-big) | `Xenova/opus-mt-tc-big-tr-en` (298 MB) and `onnx-community/opus-mt-tc-big-tr-en` (531 MB) exist. One pair per direction; the 113 MB `Xenova/opus-mt-tr-en` translated all three sentences right, so it is the one pinned. |
+| en->tr (en-trk) | `onnx-community/opus-mt-en-trk-ONNX` (`>>tur<<`): 9.2 BLEU on newstest2016 against 23.4 for tc-big. |
+| en->vi (onnx-community) | `onnx-community/opus-mt-en-vi-ONNX` has a 164 MB decoder; Xenova's export of the same model is 54 MB. |
+| cs, en-cs, bat-en at onnx-community | No quantized graphs in the merged-decoder layout; the Xenova exports are used. |
+| mul-en for languages already covered | One pair per direction; a bilingual or family model is used where one exists. |
+| en->ja via `opus-mt-en-jap`, ja->en | Japanese is ElanMT-BT (above). |
+| Non-English pairs (da-de, es-fr, gem-gem, gmw-gmw, he-ar and others) | Hub and spoke: English on one end of every pair. |
+| en->ko, en->pl | Still no clean single-language ONNX export. en-mul has `>>kor<<` and `>>pol<<` but pl scores 22.7 and ko is not on the card. |
+| en->ko (`Helsinki-NLP/opus-mt-tc-big-en-ko`, CC-BY-4.0, commit `ae8606b7`) | Converted by Trellis on 2026-11-12 (two int8 graphs, 280 MB) and run for real: gibberish ("Where is the train station?" gave "1:26 인기 있는 well 대"). The upstream PyTorch model in Hugging Face's own runner gives the same output, so the fault is upstream, not the conversion. The original MarianNMT model has separate source and target vocabularies ("sepvoc"); the Hugging Face copy kept one 32,001-piece vocabulary that is mostly Korean (24,349 Hangul pieces), so common English words ("train", "coffee", "children") are unknown tokens. Not registered. A fix would convert the original MarianNMT release with both vocabularies, and teach the app a separate source vocabulary. |
+
+**Licenses.** All upstream Helsinki-NLP cards for the pinned models say
+apache-2.0, except tc-big-en-tr, which says cc-by-4.0, as does its
+onnx-community card. Xenova's cards carry no licence. No other licence
+was found, so nothing was skipped for its licence. The Models screen's
+OPUS-MT credit already covers both licences.

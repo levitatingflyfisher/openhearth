@@ -1,0 +1,991 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:comms_core/comms_core.dart' as comms;
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:openhearth_design/openhearth_design.dart';
+
+import '../../db/database.dart';
+import '../../services/picked_save.dart';
+import '../dsp/dsp_coordinator.dart';
+import '../player/player_controller.dart';
+import '../episodes/episode_actions.dart';
+import '../transcribe/transcribe_coordinator.dart';
+import '../works/work_menu.dart';
+import '../works/work_open.dart';
+import '../works/work_row.dart';
+import '../reader/reader_doors.dart';
+import '../search/search_screen.dart';
+import '../search/search_store.dart';
+import 'background/feed_check_section.dart';
+import 'background/feed_check_settings.dart';
+import 'episode_download_coordinator.dart';
+import 'feed_detail_screen.dart';
+import 'feed_ingest.dart';
+import 'feed_settings_screen.dart';
+import 'feeds_repository.dart';
+import 'subscribe_screen.dart';
+import '../shared/capped_body.dart';
+import '../shared/coalesced_reload.dart';
+import '../shared/shelf_key.dart';
+
+export '../shared/shelf_key.dart' show shelfKey;
+
+/// The platform seams for OPML files — injectable so widget tests never
+/// touch a platform channel. Pure parsing/serialization is comms_core's.
+typedef OpmlBytesPicker = Future<List<int>?> Function();
+typedef OpmlBytesSaver =
+    Future<bool> Function(String suggestedName, List<int> bytes);
+
+Future<List<int>?> pickOpmlWithFilePicker() async {
+  final result = await FilePicker.platform.pickFiles(
+    type: FileType.custom,
+    allowedExtensions: ['opml', 'xml'],
+    withData: true,
+  );
+  final file = result?.files.firstOrNull;
+  if (file == null) return null;
+  return file.bytes ?? await File(file.path!).readAsBytes();
+}
+
+Future<bool> saveOpmlWithFilePicker(
+  String suggestedName,
+  List<int> bytes,
+) async {
+  final path = await FilePicker.platform.saveFile(
+    fileName: suggestedName,
+    bytes: Uint8List.fromList(bytes),
+  );
+  return finishPickedSave(path, bytes);
+}
+
+/// Subscriptions (ADR-0016 section 3): every source, shelved by where it
+/// came from (Podcasts, Blogs and newsletters, Books), plus follow,
+/// unfollow (taking what was never kept with it — ADR-0019) and OPML both
+/// ways. Shelves are alphabetical, never ranked (ADR-0003 law 1).
+class FeedsScreen extends StatefulWidget {
+  final AppDatabase db;
+  final FeedsRepository repository;
+  final Profile profile;
+  final OpmlBytesPicker pickOpmlBytes;
+  final OpmlBytesSaver saveOpmlBytes;
+
+  /// DeviceServices.localMlAvailable, handed down by the shell. Where
+  /// false (the web tier) the household DSP default toggle is simply not
+  /// offered — it would set a preference nothing on this tier can ever
+  /// act on (dart:io's File throws on any real op under dart2js).
+  final bool localMlAvailable;
+
+  /// Handed on to each podcast page so it can play, download and process
+  /// from its rows; null leaves those doors closed.
+  final PlayerController? playerController;
+  final EpisodeDownloadCoordinator? downloadCoordinator;
+  final DspCoordinator? dspCoordinator;
+
+  /// Handed on so every list this page opens offers Transcribe.
+  final TranscribeCoordinator? transcriber;
+
+  /// How the Books shelf opens a book: the Library's own way, so voice,
+  /// recap and translation behave the same from either door.
+  final ReaderDoors readerDoors;
+
+  /// The device's feed-check switches, behind "Wi-Fi and data" here as
+  /// well as under Models & storage; null where nothing can run in the
+  /// background (the web build, widget tests), and then no door is shown.
+  final FeedCheckSettings? feedCheck;
+
+  const FeedsScreen({
+    super.key,
+    required this.db,
+    required this.repository,
+    required this.profile,
+    this.feedCheck,
+    this.localMlAvailable = true,
+    this.playerController,
+    this.downloadCoordinator,
+    this.dspCoordinator,
+    this.readerDoors = const ReaderDoors(),
+    this.transcriber,
+    OpmlBytesPicker? pickOpmlBytes,
+    OpmlBytesSaver? saveOpmlBytes,
+  }) : pickOpmlBytes = pickOpmlBytes ?? pickOpmlWithFilePicker,
+       saveOpmlBytes = saveOpmlBytes ?? saveOpmlWithFilePicker;
+
+  @override
+  State<FeedsScreen> createState() => _FeedsScreenState();
+}
+
+class _FeedsScreenState extends State<FeedsScreen> {
+  List<Feed>? _feeds;
+  Map<int, int> _unplayed = const {};
+  List<_Book> _books = const [];
+  WorkListState _bookState = WorkListState.empty;
+  int? _lastCheckedMs;
+
+  /// Set while an OPML import is checking its new feeds.
+  ({int done, int total})? _importProgress;
+  bool _importing = false;
+
+  /// Feeds unfollowed but still on offer to Undo (fleet delete ruling:
+  /// a deliberate unfollow doesn't ask; its Undo never times out). The
+  /// cascade runs only when the offer is let go.
+  final Set<int> _unfollowing = {};
+  final OhUndoController _undo = OhUndoController();
+
+  /// The "Find a subscription" words, and the one shelf picked by its
+  /// chip (null: every shelf). Both filter what is already loaded, so they
+  /// answer at once and never touch the database.
+  final _find = TextEditingController();
+  String _query = '';
+  _Shelf? _shelf;
+
+  /// Set by an import's "Show them": the shows that file named, already
+  /// followed. Null shows every show.
+  Set<int>? _fromFile;
+
+  /// Set when the import should stop starting feeds: the page was left,
+  /// or the app went to the background. Neither the import nor its
+  /// artwork resumes on its own, so it shouldn't keep the phone busy for
+  /// someone who has stopped watching.
+  bool _stopImport = false;
+
+  /// True only while the import's feeds are being checked. Armed after the
+  /// file arrives: on Android the system picker is its own activity, and
+  /// the app hiding behind it must not stop the import it picks for.
+  bool _checking = false;
+  late final AppLifecycleListener _lifecycle =
+      AppLifecycleListener(onHide: _stopImporting);
+
+  void _stopImporting() {
+    if (!_checking || _stopImport) return;
+    _stopImport = true;
+    widget.repository.drainArtwork();
+  }
+
+  @override
+  void dispose() {
+    _stopImporting();
+    _lifecycle.dispose();
+    _beats.cancel();
+    _find.dispose();
+    _undo.dispose();
+    super.dispose();
+  }
+
+  /// Leaving lets a pending unfollow go, and the cascade finishes before the
+  /// route pops: Latest reloads as soon as it is back and must not show
+  /// the unfollowed feed's items.
+  Future<void> _leave() async {
+    await _undo.dismiss();
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle;
+    _load();
+  }
+
+  /// Each followed show's artwork found on disk, by feed id. A file once
+  /// found stays (artwork is fetched once and kept); a missing one is
+  /// looked for again after each load, since an import's artwork arrives
+  /// behind it.
+  final Map<int, File> _art = {};
+
+  /// Import progress beats once per feed; this folds those into one
+  /// reload at a time, at most about once a second.
+  late final _reloads = CoalescedReload(_load);
+  late final _beats = RequestThrottle(() => _reloads.request());
+
+  Future<void> _load() async {
+    final profileId = widget.profile.id;
+    final feeds = await widget.db.feedsDao.subscriptionsOf(profileId);
+    final unplayed = await widget.db.feedsDao.unplayedCountsOf(profileId);
+    final books = await widget.db.spineDao.booksOf(profileId);
+    // The books' row facts read every position and the queue; a list of
+    // shows alone has no use for them.
+    final bookState = books.isEmpty
+        ? WorkListState.empty
+        : await WorkListState.load(widget.db, profileId,
+            entries: [for (final b in books) (work: b.work, episode: null)],
+            carry: _bookState);
+    final lastChecked = await readLastChecked(widget.db, profileId);
+    if (!mounted) return;
+    unawaited(_findArt(feeds));
+    setState(() {
+      _feeds = feeds..sort((a, b) => shelfKey(_feedName(a))
+          .compareTo(shelfKey(_feedName(b))));
+      _unplayed = unplayed;
+      _books = books..sort((a, b) => shelfKey(a.work.title)
+          .compareTo(shelfKey(b.work.title)));
+      _bookState = bookState;
+      _lastCheckedMs = lastChecked;
+    });
+  }
+
+  bool _findingArt = false;
+  List<Feed>? _artWanted;
+
+  /// Looks for missing artwork files off the reload, with async checks:
+  /// 118 synchronous stats per reload were the UI isolate's to pay. One
+  /// pass at a time; feeds asked for meanwhile get the next.
+  Future<void> _findArt(List<Feed> feeds) async {
+    final services = widget.localMlAvailable ? widget.repository.services : null;
+    if (services == null) return;
+    _artWanted = feeds;
+    if (_findingArt) return;
+    _findingArt = true;
+    try {
+      for (var wanted = _artWanted; wanted != null; wanted = _artWanted) {
+        _artWanted = null;
+        var found = false;
+        for (final f in wanted) {
+          if (_art.containsKey(f.id)) continue;
+          final file = services.artworkFileFor(f.id);
+          if (await file.exists()) {
+            _art[f.id] = file;
+            found = true;
+          }
+        }
+        if (found && mounted) setState(() {});
+      }
+    } finally {
+      _findingArt = false;
+    }
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _follow() async {
+    final followed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => SubscribeScreen(
+          repository: widget.repository,
+          profileId: widget.profile.id,
+        ),
+      ),
+    );
+    if (followed == true) await _load();
+  }
+
+  void _unfollow(Feed feed) {
+    final name = feed.title.isEmpty ? feed.url : feed.title;
+    setState(() => _unfollowing.add(feed.id));
+    _undo.show(
+      message: "Unfollowed '$name'. What you haven’t kept goes too; anything "
+          'you kept stays in the Library.',
+      onUndo: () async {
+        if (mounted) setState(() => _unfollowing.remove(feed.id));
+      },
+      onCommit: () async {
+        await widget.db.feedsDao.deleteFeedCascade(feed.id);
+        _unfollowing.remove(feed.id);
+        if (mounted) await _load();
+      },
+    );
+  }
+
+  Future<void> _openSettings(Feed feed) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => FeedSettingsScreen(
+            db: widget.db,
+            feed: feed,
+            offerAutoDownload: widget.repository.offersAutoDownload),
+      ),
+    );
+    await _load();
+  }
+
+  Future<void> _importOpml() async {
+    // One import at a time: a second would race the first's progress.
+    if (_importing) return;
+    _importing = true;
+    try {
+      await _importOpmlUnguarded();
+    } finally {
+      _importing = false;
+    }
+  }
+
+  Future<void> _importOpmlUnguarded() async {
+    final bytes = await widget.pickOpmlBytes();
+    if (bytes == null) return;
+    final List<comms.OpmlOutline> outlines;
+    try {
+      outlines = comms.parseOpml(utf8.decode(bytes, allowMalformed: true));
+    } on comms.OpmlParseException catch (e) {
+      // The parser's words ("Invalid OPML file") are for the log.
+      debugPrint('OPML import refused: ${e.message}');
+      _toast("That file isn’t an OPML podcast list Trellis can read.");
+      return;
+    }
+    if (outlines.isEmpty) {
+      _toast('No feed URLs found in that file.');
+      return;
+    }
+    final (:added, :existing) = await widget.repository.followOutlines(
+      widget.profile.id,
+      outlines,
+    );
+    if (added.isEmpty && existing.isEmpty) {
+      // Outlines, but every address blank.
+      _toast('No feed URLs found in that file.');
+      return;
+    }
+    if (added.isEmpty) {
+      // How many matched, and which: the listener may be sure a show is in
+      // the file and still not see it on the page.
+      if (!mounted) return;
+      final ids = {for (final f in existing) f.id};
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        // A convenience: the rows are on the page either way.
+        persist: false,
+        content: Text(ids.length == 1
+            ? 'Already following that one.'
+            : 'Already following all ${ids.length}.'),
+        action: SnackBarAction(
+            label: 'Show them',
+            onPressed: () {
+              if (!mounted) return;
+              _find.clear();
+              setState(() {
+                _query = '';
+                _shelf = null;
+                _fromFile = ids;
+              });
+            }),
+      ));
+      return;
+    }
+    await _load();
+    if (mounted) {
+      setState(() => _importProgress = (done: 0, total: added.length));
+    }
+    // The donor validated each import by fetching; the breaker records the
+    // ones that fail, so their rows can say why.
+    // Left during the pick or the follow: the rows stay, unchecked, for
+    // the next refresh, as a stop would leave them.
+    if (!mounted) return;
+    _stopImport = false;
+    _checking = true;
+    final Map<int, RefreshOutcome> checked;
+    try {
+      checked = await widget.repository.refreshMany(
+        added,
+        onProgress: (done, total) {
+          if (!mounted) return;
+          setState(() => _importProgress = (done: done, total: total));
+          _beats.request();
+        },
+        shouldStop: () => _stopImport,
+      );
+    } finally {
+      _checking = false;
+    }
+    if (!mounted) return;
+    final wanted = {for (final f in added) f.id};
+    final failed = (await widget.db.feedsDao.subscriptionsOf(widget.profile.id))
+        .where((f) => wanted.contains(f.id))
+        .map(stateOfFeed)
+        .where((s) => s.consecutiveFailures > 0 || s.broken)
+        .length;
+    if (mounted) setState(() => _importProgress = null);
+    await _load();
+    final n = added.length;
+    final unchecked = n - checked.length;
+    _toast([
+      'Following $n new ${n == 1 ? 'feed' : 'feeds'}.',
+      if (failed == 1) '1 couldn’t be reached; its row says why.',
+      if (failed > 1) '$failed couldn’t be reached; their rows say why.',
+      if (unchecked == 1) '1 isn’t checked yet; the next refresh checks it.',
+      if (unchecked > 1)
+        '$unchecked aren’t checked yet; the next refresh checks them.',
+    ].join(' '));
+  }
+
+  Future<void> _exportOpml() async {
+    final feeds = await widget.db.feedsDao.subscriptionsOf(widget.profile.id);
+    if (feeds.isEmpty) {
+      _toast('Nothing to export yet.');
+      return;
+    }
+    final xml = comms.exportOpml([
+      for (final f in feeds) comms.OpmlOutline(url: f.url, title: f.title),
+    ], profileName: widget.profile.name);
+    final saved = await widget.saveOpmlBytes(
+      'trellis-feeds.opml',
+      utf8.encode(xml),
+    );
+    if (saved) _toast('Exported ${feeds.length} feeds.');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final feeds = _feeds == null
+        ? null
+        : [
+            for (final f in _feeds!)
+              if (!_unfollowing.contains(f.id)) f
+          ];
+    final empty = feeds != null && feeds.isEmpty && _books.isEmpty;
+    return PopScope(
+      canPop: _unfollowing.isEmpty,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _leave();
+      },
+      child: Scaffold(
+        bottomSheet: OhUndoBar(controller: _undo),
+        appBar: AppBar(
+          title: const Text('Subscriptions'),
+          actions: [
+            OhBarActions(children: [
+            OhBarOverflow<String>(
+              key: const Key('opml-menu'),
+              onSelected: (v) => switch (v) {
+                'import' => _importOpml(),
+                _ => _exportOpml(),
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(value: 'import', child: Text('Import OPML')),
+                const PopupMenuItem(value: 'export', child: Text('Export OPML')),
+              ],
+            ),
+            ]),
+          ],
+        ),
+        // The empty state carries its own Follow; everywhere else this
+        // stays in reach, since following is why most people come here.
+        floatingActionButton: (feeds == null || empty)
+            ? null
+            : FloatingActionButton.extended(
+                key: const Key('follow'),
+                onPressed: _follow,
+                icon: const Icon(Icons.add),
+                label: const Text('Follow'),
+              ),
+        body: CappedBody(child: Column(children: [
+          if (feeds != null && !empty) _findField(),
+          if (feeds != null && !empty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 4, 4),
+              child: SizedBox(
+                width: double.infinity,
+                // The door wraps under the line when both don't fit.
+                child: Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      lastCheckedLabel(
+                          lastMs: _lastCheckedMs,
+                          nowMs: DateTime.now().millisecondsSinceEpoch),
+                      key: const Key('feeds-last-checked'),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    if (widget.feedCheck != null)
+                      // Beside what it governs, in plain sight (1.6.0,
+                      // user: "update on WiFi or not" was "missing"; the
+                      // switches sat only under Models & storage).
+                      TextButton.icon(
+                        key: const Key('feeds-wifi-and-data'),
+                        onPressed: _openWifiAndData,
+                        icon: const Icon(Icons.wifi),
+                        label: const Text('Wi-Fi and data'),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          if (_importProgress case final p?) _ImportProgress(progress: p),
+          if (feeds != null && !empty) ?_shelfChips(feeds),
+          Expanded(child: switch (feeds) {
+            null => const Center(child: CircularProgressIndicator()),
+            _ when empty => _EmptyFeeds(onFollow: _follow),
+            _ => _shelfList(feeds),
+          }),
+        ])),
+      ),
+    );
+  }
+
+  /// The device's Wi-Fi switches, in a sheet over this page.
+  Future<void> _openWifiAndData() async {
+    final settings = widget.feedCheck;
+    if (settings == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) => SafeArea(
+        child: SingleChildScrollView(
+          key: const Key('wifi-and-data-sheet'),
+          child: FeedCheckSection(settings: settings),
+        ),
+      ),
+    );
+  }
+
+  /// Rows are built as they scroll in: 300 follows used to build 300
+  /// tiles before the first frame.
+  Widget _shelfList(List<Feed> feeds) {
+    final rows = _shelves(feeds);
+    return ListView.builder(
+      padding: const EdgeInsets.only(bottom: 88),
+      itemCount: rows.length,
+      itemBuilder: (_, i) => rows[i](),
+    );
+  }
+
+  Widget _findField() {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: TextField(
+        key: const Key('feeds-find'),
+        controller: _find,
+        textInputAction: TextInputAction.search,
+        // Typing searches every shelf: a chosen shelf would hide a match
+        // on another one behind "No subscription matches".
+        onChanged: (text) => setState(() {
+          _query = text.trim();
+          if (_query.isNotEmpty) _shelf = null;
+        }),
+        decoration: InputDecoration(
+          hintText: 'Find a subscription',
+          prefixIcon: const Icon(Icons.search),
+          suffixIcon: _query.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: 'Clear',
+                  icon: const Icon(Icons.clear),
+                  onPressed: () {
+                    _find.clear();
+                    setState(() => _query = '');
+                  },
+                ),
+          filled: true,
+          fillColor: scheme.surfaceContainerHigh,
+          border: const OutlineInputBorder(
+            borderRadius: BorderRadius.all(Radius.circular(28)),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The same rule as every other search box: each word a word start.
+  bool _matches(String name) => SearchStore.wordsMatch(_query, name);
+
+  /// One chip per shelf, named as the shelf is, with its count: the
+  /// newsletter shelf sits below every podcast, and 118 podcasts is a
+  /// long way to scroll to learn it exists. A chip shows that shelf
+  /// alone (a lazy list can't scroll to a row it hasn't built); tapped
+  /// again, every shelf is back. One shelf alone needs no chips.
+  Widget? _shelfChips(List<Feed> feeds) {
+    final counts = _shelfCounts(feeds);
+    final fromFile = _fromFile;
+    if (counts.length < 2 && fromFile == null) return null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
+      child: Align(
+        alignment: AlignmentDirectional.centerStart,
+        child: Wrap(spacing: 8, children: [
+          if (fromFile != null)
+            InputChip(
+              key: const Key('from-file-chip'),
+              label: Text('From that file ${fromFile.length}'),
+              selected: true,
+              showCheckmark: false,
+              onPressed: () => setState(() => _fromFile = null),
+              onDeleted: () => setState(() => _fromFile = null),
+              deleteButtonTooltipMessage: 'Show every show',
+            ),
+          if (counts.length >= 2)
+          for (final MapEntry(key: shelf, value: n) in counts.entries)
+            FilterChip(
+              key: Key('shelf-chip-${shelf.name}'),
+              label: Text('${shelf.title} $n'),
+              selected: _activeShelf(feeds) == shelf,
+              onSelected: (_) => setState(() =>
+                  _shelf = _activeShelf(feeds) == shelf ? null : shelf),
+            ),
+        ]),
+      ),
+    );
+  }
+
+  /// Each non-empty shelf's count, over the shows still on the page.
+  Map<_Shelf, int> _shelfCounts(List<Feed> feeds) {
+    final blogs = feeds.where((f) => f.origin == 'blog').length;
+    return {
+      _Shelf.podcasts: feeds.length - blogs,
+      _Shelf.blogs: blogs,
+      _Shelf.books: _books.length,
+    }..removeWhere((_, n) => n == 0);
+  }
+
+  /// The chosen shelf, while its chip is still there to let it go: once
+  /// its shelf empties (its last show unfollowed) or the chips go, every
+  /// shelf shows again, so the page is never blank with no way back.
+  _Shelf? _activeShelf(List<Feed> feeds) {
+    final counts = _shelfCounts(feeds);
+    return counts.length >= 2 && counts.containsKey(_shelf) ? _shelf : null;
+  }
+
+  /// Empty shelves are left out rather than shown with a zero: there is
+  /// nothing to see there.
+  List<Widget Function()> _shelves(List<Feed> allFeeds) {
+    final active = _activeShelf(allFeeds);
+    bool showing(_Shelf s) => active == null || active == s;
+    final fromFile = _fromFile;
+    final feeds = [
+      for (final f in allFeeds)
+        if (_matches(_feedName(f)) &&
+            (fromFile == null || fromFile.contains(f.id)))
+          f
+    ];
+    final podcasts = [
+      if (showing(_Shelf.podcasts))
+        for (final f in feeds) if (f.origin != 'blog') f
+    ];
+    final blogs = [
+      if (showing(_Shelf.blogs))
+        for (final f in feeds) if (f.origin == 'blog') f
+    ];
+    final books = [
+      if (showing(_Shelf.books) && fromFile == null)
+        for (final b in _books) if (_matches(b.work.title)) b
+    ];
+    final nothing = podcasts.isEmpty && blogs.isEmpty && books.isEmpty;
+    return [
+      if (nothing && _query.isNotEmpty)
+        () => Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Text('No subscription matches “$_query”.'),
+            ),
+      if (podcasts.isNotEmpty) ...[
+        () => _ShelfHeader(
+            key: const Key('shelf-podcasts'),
+            title: _Shelf.podcasts.title,
+            count: podcasts.length),
+        for (final f in podcasts) () => _feedTile(f),
+      ],
+      if (blogs.isNotEmpty) ...[
+        () => _ShelfHeader(
+            key: const Key('shelf-blogs'),
+            title: _Shelf.blogs.title,
+            count: blogs.length),
+        for (final f in blogs) () => _feedTile(f),
+      ],
+      if (books.isNotEmpty) ...[
+        () => _ShelfHeader(
+            key: const Key('shelf-books'),
+            title: _Shelf.books.title,
+            count: books.length),
+        for (final b in books) () => _bookTile(b),
+      ],
+      // Past the shows, the same words over episodes, notes and what was
+      // said: this page's one way into search.
+      if (_query.isNotEmpty)
+        () => ListTile(
+              key: const Key('feeds-search-all'),
+              leading: const Icon(Icons.manage_search),
+              title: Text('Search everything for “$_query”'),
+              onTap: () => _openSearch(_query),
+            ),
+    ];
+  }
+
+  Future<void> _openSearch(String query) async {
+    await Navigator.of(context).push<void>(MaterialPageRoute(
+        builder: (_) => SearchScreen(
+            initialQuery: query,
+            doors: SearchDoors(
+                db: widget.db,
+                profile: widget.profile,
+                actions: _actions,
+                readerDoors: widget.readerDoors))));
+    await _load();
+  }
+
+  late final EpisodeActions _actions = EpisodeActions(
+      db: widget.db,
+      profileId: widget.profile.id,
+      player: widget.playerController,
+      downloader: widget.downloadCoordinator,
+      dsp: widget.dspCoordinator,
+      transcriber: widget.transcriber,
+      services: widget.repository.services,
+      localMlAvailable: widget.localMlAvailable,
+      openShow: (context, feed) => _openFeed(feed));
+
+  WorkDoors get _workDoors => WorkDoors(
+      db: widget.db,
+      profileId: widget.profile.id,
+      readerDoors: widget.readerDoors,
+      actions: _actions);
+
+  /// A book on this shelf is the same row as in the Library.
+  Widget _bookTile(_Book b) {
+    final entry = (work: b.work, episode: null);
+    Future<void> read() async {
+      await _workDoors.read(context, entry);
+      await _load(); // progress may have moved
+    }
+
+    return WorkRow(
+      downloads: _actions.downloader,
+      key: Key('book-${b.work.id}'),
+      work: b.work,
+      facts: WorkRowFacts.of(b.work, null, _bookState),
+      onTap: () async {
+        final removal = await _workDoors.open(context, entry);
+        await _load();
+        // Removed from its page: reload once the Undo goes.
+        removal?.then((_) => mounted ? _load() : null);
+      },
+      onRead: read,
+      // The same menu a book has in the Library, minus the Library's own
+      // Pin and Remove.
+      menuBuilder: (_) => workMenuItems(_actions, entry,
+          transcript: _bookState.transcriptOf(b.work.id)),
+      onMenu: (choice) async {
+        await _actions.handleShared(context, choice, entry);
+        await _load();
+      },
+    );
+  }
+
+  Future<void> _openFeed(Feed feed) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => FeedDetailScreen(
+          db: widget.db,
+          repository: widget.repository,
+          feed: feed,
+          playerController: widget.playerController,
+          downloadCoordinator: widget.downloadCoordinator,
+          dspCoordinator: widget.dspCoordinator,
+          localMlAvailable: widget.localMlAvailable,
+          readerDoors: widget.readerDoors,
+          transcriber: widget.transcriber,
+        ),
+      ),
+    );
+    await _load();
+  }
+
+  /// The unplayed count, and the reason when the feed is failing: that is
+  /// what the listener needs to see while scanning the list. Null when
+  /// there is neither, so a caught-up healthy row stays one line.
+  Widget? _feedSubtitle(Feed feed) {
+    final small = Theme.of(context).textTheme.bodySmall;
+    final state = stateOfFeed(feed);
+    final unplayed = _unplayed[feed.id] ?? 0;
+    final failing = state.consecutiveFailures > 0 || state.broken;
+    if (unplayed == 0 && !failing) return null;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (unplayed > 0)
+          Text('$unplayed unplayed',
+              key: Key('unplayed-${feed.id}'), style: small),
+        if (failing)
+          Text(state.lastError ?? comms.feedUnreachableReason,
+              overflow: TextOverflow.ellipsis,
+              maxLines: 2,
+              style: small?.copyWith(
+                  color: Theme.of(context).colorScheme.error)),
+      ],
+    );
+  }
+
+  Widget _feedTile(Feed feed) {
+    final name = _feedName(feed);
+    final art = _art[feed.id];
+    final initial = _Initial(name);
+    return ListTile(
+      onTap: () => _openFeed(feed),
+      leading: _Thumb(
+        child: art != null
+            ? Image.file(art,
+                width: 48,
+                height: 48,
+                cacheWidth: thumbCacheWidth(context, 48),
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => initial)
+            : initial,
+      ),
+      title: Text(name, overflow: TextOverflow.ellipsis, maxLines: 2),
+      subtitle: _feedSubtitle(feed),
+      trailing: PopupMenuButton<String>(
+        key: Key('feed-menu-${feed.id}'),
+        tooltip: 'More',
+        onSelected: (v) =>
+            v == 'settings' ? _openSettings(feed) : _unfollow(feed),
+        itemBuilder: (_) => const [
+          PopupMenuItem(value: 'settings', child: Text('Podcast settings')),
+          PopupMenuItem(value: 'unfollow', child: Text('Unfollow')),
+        ],
+      ),
+    );
+  }
+}
+
+typedef _Book = ({Work work, int segmentCount, Position? position});
+
+/// The page's shelves, in their order, under one name each: the chips
+/// and the headings read the same words.
+enum _Shelf {
+  podcasts('Podcasts'),
+  blogs('Blogs and newsletters'),
+  books('Books');
+
+  const _Shelf(this.title);
+  final String title;
+}
+
+String _feedName(Feed feed) => feed.title.isEmpty ? feed.url : feed.title;
+
+
+class _ShelfHeader extends StatelessWidget {
+  const _ShelfHeader({super.key, required this.title, required this.count});
+  final String title;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Semantics(
+      header: true,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 20, 16, 4),
+        child: Text.rich(
+          TextSpan(children: [
+            TextSpan(text: title, style: theme.textTheme.titleMedium),
+            TextSpan(
+                text: '  $count',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant)),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+/// A row's square picture. Fixed size so long titles at large text wrap
+/// beside it instead of pushing it around.
+class _Thumb extends StatelessWidget {
+  const _Thumb({required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: SizedBox.square(
+          dimension: 48,
+          child: ColoredBox(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            child: Center(child: child),
+          ),
+        ),
+      );
+}
+
+/// The show's first letter, for a feed with no artwork (or none yet).
+class _Initial extends StatelessWidget {
+  const _Initial(this.name);
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final trimmed = shelfKey(name);
+    final letter = trimmed.isEmpty ? '?' : trimmed.characters.first;
+    return Center(
+      child: Text(letter.toUpperCase(),
+          // The box is fixed, so the letter must not grow with text scale.
+          textScaler: TextScaler.noScaling,
+          style: Theme.of(context).textTheme.titleLarge),
+    );
+  }
+}
+
+class _EmptyFeeds extends StatelessWidget {
+  final VoidCallback onFollow;
+  const _EmptyFeeds({required this.onFollow});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Icon(
+                Icons.rss_feed,
+                size: 56,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'No feeds yet.',
+                style: Theme.of(context).textTheme.titleLarge,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: onFollow,
+                icon: const Icon(Icons.add),
+                label: const Text('Follow a feed'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// "Checking 37 of 118…" over a bar, so a long import visibly moves.
+class _ImportProgress extends StatelessWidget {
+  const _ImportProgress({required this.progress});
+  final ({int done, int total}) progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final (:done, :total) = progress;
+    // Counts the feed being worked on, so it never reads "Checking 0".
+    final current = done < total ? done + 1 : total;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Checking $current of $total…',
+            key: const Key('opml-import-progress'),
+          ),
+          const SizedBox(height: 8),
+          LinearProgressIndicator(value: done / total),
+        ],
+      ),
+    );
+  }
+}

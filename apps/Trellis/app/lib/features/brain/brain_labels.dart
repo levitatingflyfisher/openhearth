@@ -1,0 +1,30 @@
+/// Human names for the Brain tiers and the provenance sentence every
+/// generated artifact carries ("distilled by tier + model", proposal-2 §7:
+/// the UI names the model so quality expectations stay honest).
+library;
+
+import 'package:brain_wiring/brain_wiring.dart';
+
+String tierDisplayName(BrainTier tier) => switch (tier) {
+      BrainTier.none => 'no brain',
+      BrainTier.byokAnthropic => 'your Anthropic key',
+      BrainTier.byokOpenAiCompatible => 'an OpenAI-compatible endpoint',
+      // Plain words, not the internal jargon (the identifier stays
+      // BrainTier.stove) — a real device tester read "household stove" as
+      // insane. "Home desktop" is what a family actually calls the
+      // machine this tier reaches (Campaign 8 "Babel widens" Addendum 2).
+      BrainTier.stove => 'the home desktop',
+      BrainTier.localStub => 'a local model',
+    };
+
+/// The provenance line for a generated course.
+String distilledByLine(Provenance p) =>
+    'Distilled by ${p.modelId} · ${tierDisplayName(p.brainTier)}';
+
+/// The provenance line for a critique.
+String critiqueByLine(Provenance p) =>
+    'Critique by ${p.modelId} · ${tierDisplayName(p.brainTier)}';
+
+/// The provenance line for a Campaign 4 Phase 4 recap.
+String recapByLine(Provenance p) =>
+    'Recapped by ${p.modelId} · ${tierDisplayName(p.brainTier)}';

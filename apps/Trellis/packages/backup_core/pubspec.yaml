@@ -1,0 +1,15 @@
+name: backup_core
+description: Encrypted .ohbk backup + both-donor migration (Trellis .ohbk, ohPrimer
+  plaintext JSON) into DB-agnostic row maps. The crypto is the real sanctuary_auth_core
+  (BIP39 -> HKDF appDomain -> ChaCha20-Poly1305 + AAD); everything else is pure mapping
+  logic.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.10.7
+dependencies:
+  sanctuary_auth_core:
+    path: ../../../../packages/sanctuary_auth_core
+dev_dependencies:
+  test: ^1.25.0
+resolution: workspace

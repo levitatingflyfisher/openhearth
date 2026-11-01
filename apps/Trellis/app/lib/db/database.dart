@@ -1,0 +1,5017 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart' show sha256;
+import 'package:drift/drift.dart';
+import 'package:jobs_core/jobs_core.dart' as jobs;
+import 'package:loom_core/loom_core.dart' as core;
+import 'package:study_core/study_core.dart' as study;
+
+import '../features/reader/reader_prefs.dart';
+import 'indexes.dart';
+import 'search_index.dart';
+
+part 'database.g.dart';
+
+/// Spine storage (ADR-0002). Enums travel as strings so the schema never
+/// couples to Dart enum indices.
+class Profiles extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get name => text()();
+
+  /// The speak-mode voice preference (ADR-0006's settings escape): false
+  /// (the default) lets the reader use a neural voice whenever one is
+  /// on-device; true pins this profile to the system voice on purpose. A
+  /// profile with no neural voice ever downloaded is unaffected either
+  /// way — the reader falls back to the system voice regardless, since
+  /// there is nothing to prefer away from.
+  BoolColumn get preferSystemVoice =>
+      boolean().withDefault(const Constant(false))();
+
+  /// The study crown's per-profile scheduler choice: 'fsrs' (the default)
+  /// or 'classic' (SM-2). A string, not a bool, so a third option never
+  /// needs a schema change — same escape-hatch shape as
+  /// [preferSystemVoice].
+  TextColumn get scheduler => text().withDefault(const Constant('fsrs'))();
+
+  /// The queue's finish law (P4 mercy #3): finishing an episode
+  /// removes it from the queue by default (false); true keeps it in place
+  /// instead — the AntennaPod top-2 request was having a CHOICE here.
+  BoolColumn get keepFinishedInQueue =>
+      boolean().withDefault(const Constant(false))();
+
+  /// The offline DSP preprocess's (Campaign 6, ADR-0012) app-wide default:
+  /// false (the honest default — processing is opt-in) unless a feed's
+  /// own [Feeds.dspEnabled] overrides it. Same escape-hatch shape as
+  /// [preferSystemVoice]/[keepFinishedInQueue] — a household setting, not
+  /// a per-feed one.
+  BoolColumn get dspGlobalDefault =>
+      boolean().withDefault(const Constant(false))();
+
+  /// Campaign 4's one schema hop (v18): the `ReaderPrefs` blob — the print
+  /// reader's typography — as JSON in one column, the same shape
+  /// [Cards.stateJson] already uses, rather than a column per field. `'{}'`
+  /// decodes to all-default prefs (see [ReaderPrefs.decode]). It also holds
+  /// how the reader last read (mode, speed, nearby words: [ReaderSession]),
+  /// which used to be lost on every open. Follow-along stays session-scoped.
+  /// [ReadingDays], not this column, is where Phase 5's lifetime totals
+  /// read from.
+  TextColumn get readerPrefsJson =>
+      text().withDefault(const Constant('{}'))();
+
+  /// When this reader last opened Latest (ADR-0019), so the next open can
+  /// mark what is new since. Null until the first open. A column of its
+  /// own, not a [readerPrefsJson] field: the reader rewrites that blob
+  /// while Latest is a tab away.
+  IntColumn get latestSeenAtMs => integer().nullable()();
+}
+
+class Works extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  TextColumn get kind => text()();
+  TextColumn get title => text()();
+  TextColumn get sourceUrl => text().nullable()();
+  TextColumn get lang => text().nullable()();
+  TextColumn get persistence => text()();
+  IntColumn get firstSeenEpochDay => integer()();
+  BoolColumn get pinned => boolean().withDefault(const Constant(false))();
+  IntColumn get finishedEpochDay => integer().nullable()();
+
+  /// The scroll-mode translation-layer toggle (ADR-0008 "Babel" Phase 3):
+  /// persisted per work, off by default, same shape as [pinned]. Only
+  /// meaningful — and only offered in the reader's UI — when
+  /// [TranslationSentences] rows actually exist for this work.
+  BoolColumn get showTranslationLayer =>
+      boolean().withDefault(const Constant(false))();
+
+  /// Campaign 8 "Babel widens" Phase 1: WHICH language
+  /// [showTranslationLayer] refers to — `null` means no language has
+  /// ever been chosen (the show-toggle carries no meaning without one).
+  /// The two columns are kept in sync by the DAO's own setters
+  /// ([SpineDao.setActiveTranslationLang]/[SpineDao
+  /// .clearActiveTranslationLang]), never written independently — "one
+  /// active translation layer per work at a time" is the law this column
+  /// makes literal: there is exactly one slot, not a set.
+  TextColumn get activeTranslationLang => text().nullable()();
+
+  /// The language the work page last opened this work in (1.5.4): null
+  /// for the original, else the tag of a translation that exists for it,
+  /// a translated-sentence layer or a whole-segment `mt` layer. Its own
+  /// slot rather than [activeTranslationLang], which is the reader's
+  /// translate-target state and can't name an `mt` layer.
+  TextColumn get readLang => text().nullable()();
+
+  /// The mode the work page last opened this work in (1.5.4): `listen`,
+  /// `read` or `watch`, and when. Every way in from the page writes it,
+  /// including the transcript and the show notes, which keep no reading
+  /// place of their own. Null until the page is first used; the page then
+  /// falls back to the reader's and the player's places.
+  TextColumn get lastMode => text().nullable()();
+  IntColumn get lastModeAtMs => integer().nullable()();
+
+  /// The target of a translation run that started and has not yet
+  /// finished or been cancelled (1.5.5). A run the system killed leaves
+  /// it set, and the reader resumes the run the next time the work is
+  /// opened; the stored sentences are the progress, so nothing else
+  /// needs keeping.
+  TextColumn get translationRunLang => text().nullable()();
+
+  /// How the reader shows this work's translation (1.5.8): `only` puts
+  /// the translated text in place of the original, in every reading
+  /// mode; null is both, each translated sentence under its original.
+  TextColumn get translationView => text().nullable()();
+}
+
+/// An item's full show notes (1.5.4), sanitized before they are stored
+/// (intake_core's `sanitizeNotesHtml`), with their plain words beside them
+/// for search. A table of its own so the episode row stays narrow: Latest
+/// pages through 20k of those and never shows notes.
+@DataClassName('WorkNote')
+class WorkNotes extends Table {
+  IntColumn get workId => integer().references(Works, #id)();
+  TextColumn get html => text()();
+  TextColumn get plain => text()();
+  @override
+  Set<Column> get primaryKey => {workId};
+}
+
+class Segments extends Table {
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get idx => integer()();
+  TextColumn get kind => text()();
+  TextColumn get body => text()();
+  @override
+  Set<Column> get primaryKey => {workId, idx};
+}
+
+/// A web link inside a segment's text (frozen references, owner ask of 21
+/// and 24 Oct 2026): the words `body.substring(startChar, endChar)` of
+/// segment [segIdx] point to [href], an absolute http or https address.
+/// [ord] keeps text order. The text itself never carries the link, so the
+/// reading place, speech and translation are untouched by it.
+@DataClassName('SegmentLink')
+class SegmentLinks extends Table {
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get segIdx => integer()();
+  IntColumn get ord => integer()();
+  IntColumn get startChar => integer()();
+  IntColumn get endChar => integer()();
+  TextColumn get href => text()();
+  @override
+  Set<Column> get primaryKey => {workId, segIdx, ord};
+}
+
+/// The kind of a page kept on the device because a text links to it. The
+/// Library never lists it; the reader opens it from the link.
+const keptCopyKind = 'frozen';
+
+/// The address a kept copy is filed under: [href] without its #fragment,
+/// so every link into one page finds the same copy.
+String keptKeyOf(String href) {
+  final hash = href.indexOf('#');
+  return hash < 0 ? href : href.substring(0, hash);
+}
+
+/// One link to store: where in which segment, and to what address.
+typedef LinkRow = ({int segIdx, int start, int end, String href});
+
+class Layers extends Table {
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get segmentIdx => integer()();
+  TextColumn get lang => text()();
+  TextColumn get kind => text()();
+  TextColumn get body => text()();
+  @override
+  Set<Column> get primaryKey => {workId, segmentIdx, lang};
+}
+
+/// Sentence-indexed Spanish (or a future language) translations (ADR-0008
+/// "Babel", Phase 3) — one row per (work, segment, sentence WITHIN that
+/// segment), keyed by the RAW index `core.splitSentences(segment.text)`
+/// assigns that sentence, never a position in some already-filtered list
+/// (`sentenceUnitsOf` in the translation feature is the one place this
+/// numbering is decided — the job that writes these rows and the reader
+/// that reads them both call it, so they can't drift apart). Finer-grained
+/// than [Layers], whose primary key stops at segmentIdx: whisper's X->EN
+/// translate task (a [Layers] row, kind `'mt'`) produces one string per
+/// WHOLE segment; Marian translates one sentence at a time, and the speak
+/// loop's per-sentence substitution needs that granularity to pair a
+/// Spanish sentence with the English cursor it plays under — the karaoke
+/// pairing IS the cursor law, no separate sync mechanism.
+///
+/// [sourceText] is the ENGLISH sentence this row translated AT WRITE TIME —
+/// compared against the current segment's sentence at lookup, so a
+/// re-ingest that reshapes a work's segments makes a stale row read as
+/// "missing" (falls back to English) instead of confidently speaking or
+/// displaying a translation for a sentence that no longer exists there.
+class TranslationSentences extends Table {
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get segmentIdx => integer()();
+  IntColumn get sentenceIdx => integer()();
+  TextColumn get lang => text()();
+  TextColumn get sourceText => text()();
+  TextColumn get body => text()();
+
+  /// Campaign 8 "Babel widens" Phase 5: which engine produced this row —
+  /// `'marian'` or a Brain identifier (`domovoi:stove`,
+  /// `domovoi:byok:<provider>`, ...). Provenance only — nothing reads
+  /// this to decide behavior, only to display it, so a `null` row
+  /// (every row written before this column existed) is read as
+  /// `'marian'` by convention rather than migrated: every row in this
+  /// table predates the Brain lane, so it IS a Marian row.
+  TextColumn get engine => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {workId, segmentIdx, sentenceIdx, lang};
+}
+
+class Alignments extends Table {
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get segmentIdx => integer()();
+  IntColumn get tStartMs => integer()();
+  IntColumn get tEndMs => integer()();
+  BlobColumn get wordTimings => blob().nullable()();
+  @override
+  Set<Column> get primaryKey => {workId, segmentIdx};
+}
+
+class Positions extends Table {
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get segmentIdx => integer()();
+  IntColumn get wordIdx => integer()();
+  TextColumn get lastModality => text()();
+  IntColumn get updatedAtMs => integer()();
+  @override
+  Set<Column> get primaryKey => {profileId, workId};
+}
+
+/// Campaign 4 Phase 5's "additive lifetime total" (ADR-0003 law 5: no
+/// streaks) — one row per profile per UTC epoch day the reader's cursor
+/// actually advanced. [Positions] cannot answer "how many distinct days
+/// have you read" on its own: it is one overwritten row per (profile,
+/// work), so a work re-opened daily for a month still shows one
+/// `updatedAtMs`. This table is the append-only, idempotent (dupes
+/// collapse via the composite key + `insertOrIgnore`) record that makes a
+/// lifetime reading-days COUNT honestly computable — never a current/
+/// longest streak, which the law forbids outright. Landed in the same v18
+/// hop as [Profiles.readerPrefsJson] because a schema hop is spent once.
+/// The write side ([ProfilesDao.recordReadingDay]) landed ahead of Phase
+/// 5's own UI, deliberately: the totals screen should read a table that
+/// already has real rows in it, not an empty one on the day it ships.
+class ReadingDays extends Table {
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  IntColumn get epochDay => integer()();
+  @override
+  Set<Column> get primaryKey => {profileId, epochDay};
+}
+
+/// One subscription (P2). Validators (etag/lastModified) and the refresh
+/// breaker travel with the row; the breaker's transition rules stay pure in
+/// comms_core — [breakerJson] is its persisted form.
+class Feeds extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  TextColumn get url => text()();
+  TextColumn get title => text().withDefault(const Constant(''))();
+  TextColumn get etag => text().nullable()();
+  TextColumn get lastModified => text().nullable()();
+  TextColumn get breakerJson => text().withDefault(const Constant('{}'))();
+  BoolColumn get autoDownload => boolean().withDefault(const Constant(false))();
+
+  /// The archive-page URL comms_core's parser found on the last successful
+  /// refresh (RFC 5005 rel="next"/rel="prev-archive") — null for the
+  /// overwhelmingly common case of a host that publishes no archive.
+  /// Re-derived fresh on every successful parse; untouched otherwise.
+  TextColumn get nextPageUrl => text().nullable()();
+
+  /// Per-podcast playback settings (P4 mercy #2). Null always defers to
+  /// the player's global default — nothing here is a fallback the player
+  /// invents on its own.
+  ///
+  /// The player's speed for episodes of this feed; null uses the global
+  /// speed the player already cycles through.
+  RealColumn get speedOverride => real().nullable()();
+
+  /// Seconds to auto-seek past when an episode starts from position 0;
+  /// null skips the seek. Never applied on a resume (only a fresh start).
+  IntColumn get skipIntroSeconds => integer().nullable()();
+
+  /// Seconds before an episode's real end to stop/advance at; null plays
+  /// to the true end.
+  IntColumn get skipOutroSeconds => integer().nullable()();
+
+  /// Audio eviction (P4 "archive, never forget"): keep only the N
+  /// most-recently-published episodes' downloaded audio for this feed on
+  /// disk; null keeps all of it. The episode ROWS are never touched by
+  /// this — only the audio file, via [Episodes.archivedAtMs].
+  IntColumn get keepLatestAudio => integer().nullable()();
+
+  /// This feed's rules (Campaign 5 Phase 3), a JSON-encoded ordered list —
+  /// the house pattern (see [breakerJson]) rather than a new table, since
+  /// a rule set is small and lives entirely with its feed. Evaluated at
+  /// ingest, before an item ever becomes a river row; see
+  /// `feed_rules.dart`. `'[]'` (no rules) is the default — every existing
+  /// feed keeps behaving exactly as it did before this column existed.
+  TextColumn get rulesJson => text().withDefault(const Constant('[]'))();
+
+  /// The offline DSP preprocess's (Campaign 6, ADR-0012) per-feed opt-in:
+  /// null defers to [Profiles.dspGlobalDefault] — same "nothing here is a
+  /// fallback the player invents on its own" law as [speedOverride] and
+  /// its siblings above. true/false is an explicit override either way.
+  BoolColumn get dspEnabled => boolean().nullable()();
+
+  /// Channel-level artwork (Campaign 9 Phase 5, "the river gets faces"):
+  /// the REMOTE image URL comms_core's parser found (itunes:image href,
+  /// falling back to RSS's own image/url) — null when the host publishes
+  /// neither. This column exists only to detect "did the artwork change"
+  /// across refreshes; the actual downloaded file lives at a path derived
+  /// from the feed id (`DeviceServices.artworkFileFor`), fetched once and
+  /// never re-fetched at render.
+  TextColumn get imageUrl => text().nullable()();
+
+  /// The podcast page's order (ADR-0016): newest first unless the
+  /// listener chose oldest first for this show, e.g. to binge from the
+  /// start. Still chronological either way, so ADR-0003 law 1 holds.
+  BoolColumn get sortOldestFirst =>
+      boolean().withDefault(const Constant(false))();
+
+  /// Where this source came from (ADR-0016): `podcast` when its items
+  /// carry audio, `blog` when they don't (blogs and newsletters). Learned
+  /// from each fresh parse; it only picks the Subscriptions shelf and
+  /// never limits how an item is read or heard.
+  TextColumn get origin => text().withDefault(const Constant('podcast'))();
+
+  /// SHA-256 of the last body that parsed and ingested (ADR-0017). Many
+  /// hosts send neither ETag nor Last-Modified, so a 200 with the same
+  /// bytes is common; a matching hash skips the parse. Cleared when the
+  /// feed's rules change, since the same body can then ingest differently.
+  TextColumn get bodyHash => text().nullable()();
+
+  /// The channel's declared `<language>` as the last fresh parse found it
+  /// (`en-us`, `ru-RU`); null when the feed declares none. Transcription
+  /// locks whisper to it rather than detecting on every window.
+  TextColumn get language => text().nullable()();
+
+  /// The address this show was first followed at, kept when a permanent
+  /// move rewrites [url]; null for a show that never moved. A list
+  /// exported before the move still names the old address, and following
+  /// it again must find this row rather than add a twin.
+  TextColumn get subscribedUrl => text().nullable()();
+
+  /// True while this show's stored items may still lack the full show
+  /// notes 1.5.4 began keeping: its next few refreshes parse it in full,
+  /// whatever the validators say, a few shows per check rather than all
+  /// at once. Null otherwise, including in a backup made before it.
+  BoolColumn get notesFillPending => boolean().nullable()();
+}
+
+/// River metadata for a feed item. The item itself IS a spine work
+/// (kind episode/article, persistence ephemeron, sourceUrl = enclosure or
+/// link — ADR-0002); this row carries only what the river needs: identity
+/// for dedupe (guid), the ONE ordering key (publishedAtMs), the unread dot
+/// (readAtMs) and playback metadata.
+class Episodes extends Table {
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get feedId => integer().references(Feeds, #id)();
+  TextColumn get guid => text()();
+  TextColumn get enclosureUrl => text().nullable()();
+  IntColumn get durationMs => integer().nullable()();
+  IntColumn get publishedAtMs => integer()();
+  IntColumn get readAtMs => integer().nullable()();
+
+  /// When this episode's downloaded audio FILE was evicted to reclaim
+  /// storage (P4 "archive, never forget") — null means the audio, if it
+  /// was ever downloaded, is still on disk (or never was). The row itself
+  /// is NEVER deleted by eviction, nor by a Library removal (that only
+  /// demotes it). Unfollowing the feed removes an unkept row; ADR-0019 §1
+  /// lists every act that can. Nothing ages out.
+  IntColumn get archivedAtMs => integer().nullable()();
+
+  /// Cross-feed dedup (Campaign 5 Phase 3): why this episode is hidden
+  /// from the river — `'url'` (canonical URLs matched after tracker
+  /// stripping) or `'title'` (exact-normalized titles within 48h). Null
+  /// means not suppressed — the overwhelming common case. Dedup NEVER
+  /// suppresses two items from the SAME feed (reposts are the author's
+  /// choice); see `feed_dedup.dart`. The row is never deleted — "hidden",
+  /// not "gone".
+  TextColumn get dedupReason => text().nullable()();
+
+  /// The OTHER episode's workId this one was judged a duplicate of (the
+  /// older/canonical side of the pair) — null when [dedupReason] is null.
+  /// Exists so that if the canonical work is later deleted ([deleteWork],
+  /// unfollowing its feed), this row's suppression can
+  /// be cleared rather than left hidden with nothing left pointing at why
+  /// — "hidden" must never quietly become "lost".
+  IntColumn get duplicateOfWorkId =>
+      integer().nullable().references(Works, #id)();
+
+  /// The downloaded file's duration BEFORE the offline DSP preprocess ran
+  /// (Campaign 6, ADR-0012) — measured off the actual audio, not the
+  /// feed's own (sometimes wrong) declared [durationMs]. Null until a DSP
+  /// pass has actually run for this episode.
+  IntColumn get dspOriginalDurationMs => integer().nullable()();
+
+  /// The processed file's duration AFTER the same preprocess — the
+  /// lifetime "time saved" counter sums (dspOriginalDurationMs -
+  /// dspProcessedDurationMs) across every episode where both are set.
+  /// Null exactly when [dspOriginalDurationMs] is null (set together, in
+  /// the same atomic promote — never one without the other).
+  IntColumn get dspProcessedDurationMs => integer().nullable()();
+
+  /// When this episode was played (ADR-0016): playback reached the end
+  /// or its last 30 s, or the listener marked it played. A recorded fact
+  /// rather than a guess from position, so a row can fade with
+  /// confidence. Cleared only by "Mark unplayed".
+  IntColumn get finishedAtMs => integer().nullable()();
+
+  /// The item's own artwork URL, when the feed gives one. Only fetched
+  /// when it differs from the show's; see `FeedsRepository`.
+  TextColumn get imageUrl => text().nullable()();
+
+  /// Who handed this item in, when it was shared rather than fetched
+  /// (1.5.5): the sharing app's name, shown where a feed item shows its
+  /// show. Null for every feed item, and for a share Android named no
+  /// app for, which shows its source's title ("Shared").
+  TextColumn get sourceLabel => text().nullable()();
+
+  /// The kind of voice a made episode was spoken in (1.6.x): 'machine', a
+  /// made voice that copies nobody, or 'cloned', a copy of a real
+  /// person's voice. Share keeps a cloned voice's file behind its own
+  /// switch, so the kind is stored rather than read back out of words.
+  /// Null for every episode Trellis did not make, and for one made
+  /// before the kind was stored, when every voice was a machine voice.
+  TextColumn get voiceKind => text().nullable()();
+
+  /// How clearly a made episode was spoken (How clearly the voice
+  /// speaks): a `ListenClearness` name. Null for every episode Trellis
+  /// did not make, and for one made before the step was stored, when
+  /// every one was spoken at the voice's own pace (Natural).
+  TextColumn get clearness => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {workId};
+}
+
+/// A made language of an episode (1.6.18, owner: "it should live
+/// together"): the spoken translation is its own work, of kind `version`
+/// (its text, sentence times, place and captures hang off that work as
+/// off any), named here with its original and language. It has no
+/// Episode row, so no show, Latest or Subs list can hold it apart from
+/// its original. One per original and language.
+@DataClassName('VersionRow')
+class Versions extends Table {
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get originalId => integer().references(Works, #id)();
+  TextColumn get lang => text()();
+
+  /// The voice's name as the person saw it ("Kokoro"); null for one made
+  /// before 1.6.18, whose notes say it.
+  TextColumn get voice => text().nullable()();
+
+  /// 'machine' or 'cloned' ([Episodes.voiceKind] before 1.6.18).
+  TextColumn get voiceKind => text().nullable()();
+
+  /// How clearly it was spoken; null reads as Natural.
+  TextColumn get clearness => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {workId};
+
+  @override
+  List<Set<Column>> get uniqueKeys => [
+        {originalId, lang}
+      ];
+}
+
+/// The queue (P4 mercy #3): a position-ordered, per-profile list
+/// of works waiting to play next. Named `QueueTable`/`queue` rather than
+/// `Queue` for the same reason [JobsTable] isn't `Jobs` — `Queue` collides
+/// with `dart:collection`.
+@DataClassName('QueueRow')
+class QueueTable extends Table {
+  @override
+  String get tableName => 'queue';
+
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  IntColumn get workId => integer().references(Works, #id)();
+
+  /// Ascending = play order; the DAO renumbers on every insert/remove/
+  /// reorder so positions stay contiguous from 0 rather than accreting
+  /// gaps.
+  IntColumn get position => integer()();
+  IntColumn get addedAtMs => integer()();
+}
+
+/// A saved library filter (Campaign 5 Phase 2): a name plus a
+/// [LibraryQuery] frozen to JSON — the house pattern (Cards.stateJson,
+/// Feeds.breakerJson) rather than a second persistence mechanism; this
+/// repo has no SharedPreferences usage anywhere. [position] orders the
+/// chips row the same way [QueueTable.position] orders play order — the
+/// DAO renumbers contiguously from 0 on every insert/remove/reorder.
+@DataClassName('SavedViewRow')
+class SavedViews extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  TextColumn get name => text()();
+  TextColumn get queryJson => text()();
+  IntColumn get position => integer()();
+  IntColumn get createdAtMs => integer()();
+}
+
+/// The study crown, Phase 2: a captured moment during playback — episode,
+/// position, when it was taken. [segmentIdx] is the sentence it snapped to,
+/// via the SAME alignments the reader's follow-along and the read<->listen handoff
+/// project through (Snipd's known complaint is wrong clip boundaries from a
+/// raw ±15s guess; sentence-snapped-or-honestly-unbound is the bar here).
+/// Null means the work had no transcript yet when this was taken —
+/// [CapturesDao.backfillForWork] binds it once one arrives; a capture is
+/// never dropped for lacking one.
+@DataClassName('CaptureRow')
+class Captures extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get positionMs => integer()();
+  IntColumn get createdAtMs => integer()();
+  IntColumn get segmentIdx => integer().nullable()();
+
+  /// Campaign 7 (ADR-0013): which file of a multi-file audiobook
+  /// [positionMs] is relative to. Null for every capture on a
+  /// single-file work (an episode, or a one-file audiobook) — there
+  /// [positionMs] alone is already unambiguous, so null means "not
+  /// applicable", never "unknown".
+  IntColumn get fileIdx => integer().nullable()();
+}
+
+/// The study crown, Phase 1: zero-effort resurfacing for extracts/vocab —
+/// the gentle two-button on-ramp, never a replacement for the four-grade
+/// course flow. Keyed by (profileId, sourceType, sourceId) rather than a
+/// foreign key to any one table, because a review item can come from either
+/// [WordLedger] ('ledger') or [Captures] ('capture') — this table is
+/// deliberately the only thing that knows both exist. [stateJson] carries
+/// the SAME two-half blob course cards use ([mergeCardStateJson] /
+/// [decodeStudyCard]), so daily review follows the profile's scheduler; a
+/// row is
+/// created lazily on first grade, exactly like [Cards] — an ungraded
+/// source has no row and is treated as a brand-new, immediately-due card.
+@DataClassName('DailyReviewCardRow')
+class DailyReviewCards extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  TextColumn get sourceType => text()();
+  IntColumn get sourceId => integer()();
+  TextColumn get stateJson => text()();
+
+  @override
+  List<Set<Column>> get uniqueKeys => [
+    {profileId, sourceType, sourceId},
+  ];
+}
+
+/// Raw listening position for works WITHOUT alignments. When alignments
+/// exist the player projects time → segmentIdx and writes the same
+/// [Positions] row the reader reads (the cursor law); this table is the
+/// honest fallback until a transcript exists.
+class PlayerPositions extends Table {
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get tMs => integer()();
+  IntColumn get updatedAtMs => integer()();
+
+  /// Campaign 7 (ADR-0013): which file of a multi-file audiobook this
+  /// position belongs to. A single-file work (every episode; a one-file
+  /// audiobook) is always file 0, which is also this column's default —
+  /// no pre-campaign row ever needed to change, and no episode-reading
+  /// code ever needs to look at it.
+  IntColumn get fileIdx => integer().withDefault(const Constant(0))();
+  @override
+  Set<Column> get primaryKey => {profileId, workId};
+}
+
+/// Campaign 7 (ADR-0013 "audiobooks are a door"): one settings row per
+/// audiobook work, created once at import time. Deliberately its OWN
+/// table rather than an extension of [Feeds]'s playback columns — an
+/// audiobook has no feed to hang a row off of, and generalizing
+/// [Feeds.speedOverride] to "any audio source" would mean touching every
+/// site that already reads it as feed-scoped. See the ADR for the full
+/// reasoning.
+@DataClassName('AudiobookRow')
+class Audiobooks extends Table {
+  IntColumn get workId => integer().references(Works, #id)();
+
+  /// Per-book speed override, the audiobook parallel to
+  /// [Feeds.speedOverride]. Null defers to the player's own global speed
+  /// cycling — the same "nothing here is a fallback the player invents on
+  /// its own" law every other per-source override in this schema follows.
+  RealColumn get speedOverride => real().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {workId};
+}
+
+/// Campaign 7: one row per file in an audiobook, in PLAYBACK order.
+/// [fileIdx] is the file axis of the position law (ADR-0013): a Position
+/// for a multi-file work is (fileIdx, offset) rather than one cross-file
+/// millisecond, because a later file's duration is only ever learned once
+/// it actually plays (nothing probes it at import) — there is no sound
+/// way to collapse "file 2, 30s in" to a single number without knowing
+/// how long files 0 and 1 run.
+@DataClassName('AudiobookFileRow')
+class AudiobookFiles extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get workId => integer().references(Works, #id)();
+  IntColumn get fileIdx => integer()();
+
+  /// Absolute path to the copied file inside app storage — the
+  /// referenced-vs-copied verdict (ADR-0013) is "copied, always" on this
+  /// app's one shipped native tier, so this is never a path the app
+  /// doesn't own.
+  TextColumn get path => text()();
+
+  /// Learned lazily the first time this file actually plays
+  /// ([PlayerController]'s duration-stream handler) — null until then.
+  /// Nothing at import time probes this; the library tile's progress is
+  /// file-count-coarse, not time-precise, so nothing needs it sooner.
+  IntColumn get durationMs => integer().nullable()();
+
+  @override
+  List<Set<Column>> get uniqueKeys => [
+    {workId, fileIdx},
+  ];
+}
+
+/// The word ledger: words the user's hand set aside while reading or
+/// listening. Dedupe lives in the schema — (profileId, word) is unique with
+/// [word] carrying COLLATE NOCASE, so every code path folds case in SQLite
+/// itself. [sourceWorkId] is provenance only and declares ON DELETE SET
+/// NULL: works come and go (an unfollow, library removal), but the
+/// ledger is the user's own collection (the promotion principle, ADR-0003
+/// law 2) — deleting a work degrades provenance to null instead of draining
+/// the notebook the way CASCADE silently would.
+@DataClassName('WordLedgerRow')
+class WordLedger extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  TextColumn get word => text().customConstraint('NOT NULL COLLATE NOCASE')();
+  TextColumn get lang => text().nullable()();
+  IntColumn get sourceWorkId => integer().nullable().references(
+    Works,
+    #id,
+    onDelete: KeyAction.setNull,
+  )();
+  IntColumn get addedAtMs => integer()();
+
+  @override
+  List<Set<Column>> get uniqueKeys => [
+    {profileId, word},
+  ];
+}
+
+/// One imported `.ohcourse` per reader (P0/§6 study slice). [raw] is the file
+/// text VERBATIM — study_core's strict parser is the single authority over
+/// its meaning, and it must have accepted the text before a row may exist.
+/// [courseId] is the course's own id from the file, kept for per-profile
+/// dedupe; [id] is this row's identity everywhere else.
+@DataClassName('CourseRow')
+class Courses extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get profileId => integer().references(Profiles, #id)();
+  TextColumn get courseId => text()();
+  TextColumn get title => text()();
+  TextColumn get raw => text()();
+  IntColumn get importedAtMs => integer()();
+
+  @override
+  List<Set<Column>> get uniqueKeys => [
+    {profileId, courseId},
+  ];
+}
+
+/// A picture on a card (owner, 28 Oct: "anything stolen from mochi or
+/// from anki on having cloze and images"). A course item names it by
+/// [name] (study_core's `image`); the bytes live here, not in files, so
+/// the web build keeps them too, a session needs no network, and a
+/// backup carries them with the course that names them. The name is the
+/// bytes' hash, so one picture is kept once however often it is used.
+@DataClassName('CardImageRow')
+class CardImages extends Table {
+  TextColumn get name => text()();
+  BlobColumn get bytes => blob()();
+
+  @override
+  Set<Column> get primaryKey => {name};
+}
+
+/// One retrieval item's SRS state. [stateJson] carries
+/// reps/ease/intervalDays/dueEpochDay/lapses (see [encodeCardState]) so the
+/// schema never couples to the scheduler's exact field set.
+@DataClassName('CardRow')
+class Cards extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get courseId => integer().references(Courses, #id)();
+  TextColumn get itemId => text()();
+  TextColumn get stateJson => text()();
+
+  @override
+  List<Set<Column>> get uniqueKeys => [
+    {courseId, itemId},
+  ];
+}
+
+/// Append-only review log — a fold source (FSRS food, proposal-2 §6), never
+/// mutated: [StudyDao] exposes append and read and nothing else. The card
+/// row is merely the cached fold of this log through scheduleSm2.
+@DataClassName('RevlogRow')
+class Revlog extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  IntColumn get cardId => integer().references(Cards, #id)();
+  TextColumn get grade => text()();
+  IntColumn get tsMs => integer()();
+  IntColumn get intervalBeforeDays => integer()();
+  IntColumn get intervalAfterDays => integer()();
+}
+
+/// The household's optional parent PIN (P5): one row (id 0) holding the
+/// per-household random salt and the salted SHA-256 digest — never the PIN
+/// itself. It lives in the database rather than a platform keystore so the
+/// same law holds on every surface, web included, and travels with the
+/// household's data. There is deliberately no recovery column: a forgotten
+/// PIN can only be cleared by clearing the app's data (the honest hard
+/// path — a backdoor would make the gate a fiction).
+@DataClassName('HouseholdPinRow')
+class HouseholdPin extends Table {
+  IntColumn get id => integer()();
+  TextColumn get salt => text()();
+  TextColumn get hash => text()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// Device-level settings, one row per key: what belongs to this device
+/// rather than to a reader (the theme choice, which reader was last
+/// active). Key/value so a new setting never needs a schema hop. Not part
+/// of a backup: another device keeps its own.
+@DataClassName('DeviceSettingRow')
+class DeviceSettings extends Table {
+  TextColumn get key => text()();
+  TextColumn get value => text()();
+
+  @override
+  Set<Column> get primaryKey => {key};
+}
+
+/// One checkpointed long-running task (proposal-2 §9): jobs_core's row plus
+/// [payloadJson] — app-side context (which work, which whisper task) the
+/// engine never reads. States travel as [jobs.JobState] names.
+///
+/// The Dart class is `JobsTable` (SQL name `jobs`) so the generated `jobs`
+/// getter does not shadow the `jobs` import prefix inside the DAOs.
+@DataClassName('JobRow')
+class JobsTable extends Table {
+  @override
+  String get tableName => 'jobs';
+
+  TextColumn get id => text()();
+  TextColumn get kind => text()();
+  TextColumn get state => text()();
+  TextColumn get checkpoint => text().nullable()();
+  IntColumn get totalUnits => integer()();
+  IntColumn get doneUnits => integer()();
+  IntColumn get createdAtMs => integer()();
+  TextColumn get payloadJson => text().withDefault(const Constant('{}'))();
+
+  /// What went wrong, in words a person can act on ("No connection."),
+  /// never a stack trace. Null unless [state] is failed: any other save
+  /// clears it, so a retried job can't show yesterday's failure.
+  TextColumn get failureReason => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// Splits [ids] for `IN (...)` lists: SQLite builds before 3.32 cap a
+/// statement at 999 bound variables.
+Iterable<List<int>> chunksForSql(List<int> ids, {int size = 500}) sync* {
+  for (var i = 0; i < ids.length; i += size) {
+    yield ids.sublist(i, i + size > ids.length ? ids.length : i + size);
+  }
+}
+
+/// The stateJson codec for [Cards]. Kept next to the table so the column's
+/// shape and its reader can never drift apart.
+String encodeCardState(study.CardState s) => json.encode({
+  'reps': s.reps,
+  'ease': s.ease,
+  'intervalDays': s.intervalDays,
+  'dueEpochDay': s.dueEpochDay,
+  'lapses': s.lapses,
+});
+
+study.CardState decodeCardState(String itemId, String stateJson) {
+  final m = json.decode(stateJson) as Map<String, dynamic>;
+  return study.CardState(
+    itemId: itemId,
+    ease: (m['ease'] as num).toDouble(),
+    intervalDays: m['intervalDays'] as int,
+    dueEpochDay: m['dueEpochDay'] as int,
+    reps: m['reps'] as int,
+    lapses: m['lapses'] as int,
+  );
+}
+
+/// The blob key naming which scheduler wrote last. Two halves graded on the
+/// same day can't be ordered by date, and the newer one is the learner's
+/// real progress (see [study.StudyCard]).
+const _lastGradedByKey = 'lastGradedBy';
+
+/// The FSRS half of a [Cards.stateJson] blob, under `fsrs`-prefixed keys so
+/// it never collides with the classic keys above; null when absent or
+/// corrupt, so a bad half reads as "not graded under FSRS" and the other
+/// half, or a fresh start, takes over.
+study.FsrsCardState? _decodeFsrsHalf(String itemId, Map<String, dynamic> m) {
+  if (m['fsrsStability'] == null || m['fsrsDifficulty'] == null) return null;
+  try {
+    return study.FsrsCardState(
+      itemId: itemId,
+      stability: (m['fsrsStability'] as num).toDouble(),
+      difficulty: (m['fsrsDifficulty'] as num).toDouble(),
+      dueEpochDay: m['fsrsDueEpochDay'] as int,
+      reps: m['fsrsReps'] as int? ?? 0,
+      lapses: m['fsrsLapses'] as int? ?? 0,
+      lastReviewEpochDay: m['fsrsLastReviewEpochDay'] as int?,
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Both halves of a stored card plus which was graded last; null when
+/// neither half decodes, so a caller skips that one row, not the course.
+study.StudyCard? decodeStudyCard(String itemId, String stateJson) {
+  final Map<String, dynamic> m;
+  try {
+    final decoded = json.decode(stateJson);
+    if (decoded is! Map<String, dynamic>) return null;
+    m = decoded;
+  } catch (_) {
+    return null;
+  }
+  study.CardState? classic;
+  try {
+    classic = decodeCardState(itemId, stateJson);
+  } catch (_) {
+    classic = null;
+  }
+  final fsrs = _decodeFsrsHalf(itemId, m);
+  if (classic == null && fsrs == null) return null;
+  final stamp = switch (m[_lastGradedByKey]) {
+    'fsrs' => study.Scheduler.fsrs,
+    'classic' => study.Scheduler.classic,
+    _ => null,
+  };
+  return study.StudyCard(
+    itemId: itemId,
+    classic: classic,
+    fsrs: fsrs,
+    lastGradedBy: stamp,
+  );
+}
+
+Map<String, dynamic> _fsrsBlobKeys(study.FsrsCardState f) => {
+  'fsrsStability': f.stability,
+  'fsrsDifficulty': f.difficulty,
+  'fsrsDueEpochDay': f.dueEpochDay,
+  'fsrsReps': f.reps,
+  'fsrsLapses': f.lapses,
+  if (f.lastReviewEpochDay != null)
+    'fsrsLastReviewEpochDay': f.lastReviewEpochDay,
+};
+
+Map<String, dynamic> _classicBlobKeys(study.CardState s) => {
+  'reps': s.reps,
+  'ease': s.ease,
+  'intervalDays': s.intervalDays,
+  'dueEpochDay': s.dueEpochDay,
+  'lapses': s.lapses,
+};
+
+/// Merges a [classic] and/or [fsrs] update into [existingStateJson]'s blob,
+/// leaving whichever half is not supplied exactly as it was and stamping
+/// which scheduler wrote last. The untouched half stays as it was so a
+/// switch back can tell it is stale and reseed it from the newer one
+/// ([study.StudyCard]) rather than resume from frozen progress. A
+/// corrupt existing blob is treated as empty rather than thrown (a single
+/// bad row must not block the review that would have fixed it).
+String mergeCardStateJson(
+  String? existingStateJson, {
+  study.CardState? classic,
+  study.FsrsCardState? fsrs,
+}) {
+  var merged = <String, dynamic>{};
+  if (existingStateJson != null) {
+    try {
+      final decoded = json.decode(existingStateJson);
+      if (decoded is Map<String, dynamic>) merged = Map.of(decoded);
+    } catch (_) {
+      // Corrupt existing blob: this grade starts it fresh rather than
+      // failing the review that would otherwise repair it.
+    }
+  }
+  if (classic != null) {
+    merged.addAll(_classicBlobKeys(classic));
+    merged[_lastGradedByKey] = study.Scheduler.classic.name;
+  }
+  if (fsrs != null) {
+    merged.addAll(_fsrsBlobKeys(fsrs));
+    merged[_lastGradedByKey] = study.Scheduler.fsrs.name;
+  }
+  return json.encode(merged);
+}
+
+@DriftAccessor(tables: [Courses, Cards, Revlog, CardImages])
+class StudyDao extends DatabaseAccessor<AppDatabase> with _$StudyDaoMixin {
+  StudyDao(super.db);
+
+  /// Validates [raw] with study_core's strict parser and stores it verbatim.
+  /// Throws the parser's [FormatException] — with NOTHING written — on any
+  /// malformed input (the parser law: never a half-import). Re-importing a
+  /// course id this reader already has replaces the body and title but keeps
+  /// the cards: learning history survives a revision. Returns the row id.
+  Future<int> importCourse({
+    required int profileId,
+    required String raw,
+    required int nowMs,
+  }) async {
+    final course = study.parseCourseString(raw); // throws before any write
+    return transaction(() async {
+      final existing =
+          await (select(courses)..where(
+                (c) =>
+                    c.profileId.equals(profileId) &
+                    c.courseId.equals(course.id),
+              ))
+              .getSingleOrNull();
+      if (existing != null) {
+        await (update(courses)..where((c) => c.id.equals(existing.id))).write(
+          CoursesCompanion(
+            title: Value(course.title),
+            raw: Value(raw),
+            importedAtMs: Value(nowMs),
+          ),
+        );
+        // A revision can drop a picture the old text named.
+        await _letGoOfUnnamedImages();
+        return existing.id;
+      }
+      return into(courses).insert(
+        CoursesCompanion.insert(
+          profileId: profileId,
+          courseId: course.id,
+          title: course.title,
+          raw: raw,
+          importedAtMs: nowMs,
+        ),
+      );
+    });
+  }
+
+  /// Replaces course row [courseRowId]'s text with [raw] (a card made or
+  /// edited by hand). The strict parser checks it first and nothing is
+  /// written if it fails; the cards and their history stay, keyed by item
+  /// id, as on a re-import.
+  Future<void> saveCourseRaw(int courseRowId, String raw) async {
+    final course = study.parseCourseString(raw); // throws before any write
+    await transaction(() async {
+      await (update(courses)..where((c) => c.id.equals(courseRowId))).write(
+        CoursesCompanion(title: Value(course.title), raw: Value(raw)),
+      );
+      await _letGoOfUnnamedImages();
+    });
+  }
+
+  /// Drops every picture no course's text names. Run with each write
+  /// that can stop naming one, so a picture taken off a card, or one
+  /// picked in the editor and never saved, does not stay unseen. A
+  /// picture's name is a plain file name, so it appears in a course's
+  /// JSON exactly as `"name"`.
+  Future<void> _letGoOfUnnamedImages() => customStatement('''
+        DELETE FROM card_images WHERE NOT EXISTS (
+          SELECT 1 FROM courses
+          WHERE instr(courses.raw, '"' || card_images.name || '"') > 0)
+      ''');
+
+  /// Keeps [bytes] as the picture [name]; a name already kept stays as
+  /// it is (the name is the bytes' hash).
+  Future<void> putCardImage(String name, Uint8List bytes) =>
+      into(cardImages).insert(
+          CardImagesCompanion.insert(name: name, bytes: bytes),
+          mode: InsertMode.insertOrIgnore);
+
+  Future<Uint8List?> cardImage(String name) async =>
+      (await (select(cardImages)..where((i) => i.name.equals(name)))
+              .getSingleOrNull())
+          ?.bytes;
+
+  /// The pictures kept under [names], by name; a name not kept is left
+  /// out.
+  Future<Map<String, Uint8List>> cardImagesNamed(Iterable<String> names) async {
+    final wanted = names.toSet();
+    if (wanted.isEmpty) return const {};
+    final rows = await (select(cardImages)
+          ..where((i) => i.name.isIn(wanted)))
+        .get();
+    return {for (final r in rows) r.name: r.bytes};
+  }
+
+  Future<CourseRow?> courseRowById(int courseRowId) =>
+      (select(courses)..where((c) => c.id.equals(courseRowId)))
+          .getSingleOrNull();
+
+  /// This reader's course with the id inside its text, if any.
+  Future<CourseRow?> courseRowOf(int profileId, String courseId) =>
+      (select(courses)
+            ..where((c) =>
+                c.profileId.equals(profileId) & c.courseId.equals(courseId)))
+          .getSingleOrNull();
+
+  /// Removes a course with its cards and their review history, in one
+  /// transaction: a removed course leaves no card that nothing can show.
+  Future<void> deleteCourse(int courseRowId) => transaction(() async {
+        final ids = (await (select(cards)
+                  ..where((c) => c.courseId.equals(courseRowId)))
+                .get())
+            .map((c) => c.id)
+            .toList();
+        await (delete(revlog)..where((r) => r.cardId.isIn(ids))).go();
+        await (delete(cards)..where((c) => c.courseId.equals(courseRowId)))
+            .go();
+        await (delete(courses)..where((c) => c.id.equals(courseRowId))).go();
+        await _letGoOfUnnamedImages();
+      });
+
+  Future<List<CourseRow>> coursesOf(int profileId) =>
+      (select(courses)
+            ..where((c) => c.profileId.equals(profileId))
+            ..orderBy([(c) => OrderingTerm.asc(c.id)]))
+          .get();
+
+  /// itemId → every stored card of one course row, both scheduler halves.
+  /// Progress, unlock and due counts read these through
+  /// [study.StudyCard.progress], never one half directly: a card graded
+  /// only under FSRS has no classic half at all. A row whose blob fails to
+  /// decode is skipped individually (the store's law, see backup_core's
+  /// TrellisImporter precedent) rather than throwing for the whole course.
+  Future<Map<String, study.StudyCard>> loadCards(int courseRowId) async {
+    final rows = await (select(
+      cards,
+    )..where((c) => c.courseId.equals(courseRowId))).get();
+    final out = <String, study.StudyCard>{};
+    for (final r in rows) {
+      final card = decodeStudyCard(r.itemId, r.stateJson);
+      if (card != null) out[r.itemId] = card;
+    }
+    return out;
+  }
+
+  /// The stored classic halves alone, for inspecting storage. Not a
+  /// progress reader: it misses every card graded only under FSRS, and a
+  /// classic half may be stale (use [loadCards]).
+  Future<Map<String, study.CardState>> loadClassicHalves(
+    int courseRowId,
+  ) async {
+    final all = await loadCards(courseRowId);
+    return {
+      for (final e in all.entries)
+        if (e.value.classic != null) e.key: e.value.classic!,
+    };
+  }
+
+  /// One graded review, atomically: upsert the card's state to [after] and
+  /// append one revlog row. [before] supplies the pre-review interval — the
+  /// log entry the fold replays.
+  Future<void> recordGrade({
+    required int courseRowId,
+    required study.CardState before,
+    required study.CardState after,
+    required study.Grade grade,
+    required int tsMs,
+  }) {
+    assert(before.itemId == after.itemId, 'one review, one card');
+    return transaction(() async {
+      final existing =
+          await (select(cards)..where(
+                (c) =>
+                    c.courseId.equals(courseRowId) &
+                    c.itemId.equals(after.itemId),
+              ))
+              .getSingleOrNull();
+      final int cardId;
+      if (existing != null) {
+        cardId = existing.id;
+        final merged = mergeCardStateJson(existing.stateJson, classic: after);
+        await (update(cards)..where((c) => c.id.equals(cardId))).write(
+          CardsCompanion(stateJson: Value(merged)),
+        );
+      } else {
+        cardId = await into(cards).insert(
+          CardsCompanion.insert(
+            courseId: courseRowId,
+            itemId: after.itemId,
+            stateJson: mergeCardStateJson(null, classic: after),
+          ),
+        );
+      }
+      await into(revlog).insert(
+        RevlogCompanion.insert(
+          cardId: cardId,
+          grade: grade.name,
+          tsMs: tsMs,
+          intervalBeforeDays: before.intervalDays,
+          intervalAfterDays: after.intervalDays,
+        ),
+      );
+    });
+  }
+
+  /// The FSRS twin of [recordGrade]: same atomic upsert-then-append shape,
+  /// but writes only the `fsrs`-prefixed half of the blob (via
+  /// [mergeCardStateJson]), leaving any classic half as it was.
+  Future<void> recordGradeFsrs({
+    required int courseRowId,
+    required study.FsrsCardState before,
+    required study.FsrsCardState after,
+    required study.Grade grade,
+    required int tsMs,
+  }) {
+    assert(before.itemId == after.itemId, 'one review, one card');
+    return transaction(() async {
+      final existing =
+          await (select(cards)..where(
+                (c) =>
+                    c.courseId.equals(courseRowId) &
+                    c.itemId.equals(after.itemId),
+              ))
+              .getSingleOrNull();
+      final int cardId;
+      if (existing != null) {
+        cardId = existing.id;
+        final merged = mergeCardStateJson(existing.stateJson, fsrs: after);
+        await (update(cards)..where((c) => c.id.equals(cardId))).write(
+          CardsCompanion(stateJson: Value(merged)),
+        );
+      } else {
+        cardId = await into(cards).insert(
+          CardsCompanion.insert(
+            courseId: courseRowId,
+            itemId: after.itemId,
+            stateJson: mergeCardStateJson(null, fsrs: after),
+          ),
+        );
+      }
+      final beforeInterval =
+          before.dueEpochDay -
+          (before.lastReviewEpochDay ?? before.dueEpochDay);
+      await into(revlog).insert(
+        RevlogCompanion.insert(
+          cardId: cardId,
+          grade: grade.name,
+          tsMs: tsMs,
+          intervalBeforeDays: beforeInterval < 0 ? 0 : beforeInterval,
+          intervalAfterDays:
+              after.dueEpochDay -
+              (after.lastReviewEpochDay ?? after.dueEpochDay),
+        ),
+      );
+    });
+  }
+
+  /// The course's full review history, oldest first. Read-only by design.
+  Future<List<RevlogRow>> revlogOf(int courseRowId) async {
+    final q =
+        select(
+            revlog,
+          ).join([innerJoin(cards, cards.id.equalsExp(revlog.cardId))])
+          ..where(cards.courseId.equals(courseRowId))
+          ..orderBy([
+            OrderingTerm.asc(revlog.tsMs),
+            OrderingTerm.asc(revlog.id),
+          ]);
+    final rows = await q.get();
+    return [for (final r in rows) r.readTable(revlog)];
+  }
+
+  /// Campaign 4 Phase 5's Echo tile: every grade this profile has ever
+  /// made, across every course — [revlogOf] scoped to one course row,
+  /// this scoped to a whole profile via the Revlog -> Cards -> Courses
+  /// chain (Revlog itself carries no profileId).
+  Future<int> totalReviewsOf(int profileId) async {
+    final c = countAll();
+    final q = selectOnly(revlog).join([
+      innerJoin(cards, cards.id.equalsExp(revlog.cardId)),
+      innerJoin(courses, courses.id.equalsExp(cards.courseId)),
+    ])
+      ..addColumns([c])
+      ..where(courses.profileId.equals(profileId));
+    return (await q.getSingle()).read(c) ?? 0;
+  }
+}
+
+/// jobs_core's `JobStore` semantics over Drift. The engine's atomicity law
+/// holds because [saveCheckpoint] is one transaction: read the row (refusing
+/// to invent one), then merge exactly checkpoint + doneUnits. Everything
+/// else here is app-side context the engine never touches.
+///
+/// The DAO cannot `implements jobs.JobStore` itself — Drift's inherited
+/// `delete<T>(table)` collides with the contract's `delete(jobId)` — so
+/// [store] hands the engine a thin adapter instead.
+@DriftAccessor(tables: [JobsTable])
+class JobsDao extends DatabaseAccessor<AppDatabase> with _$JobsDaoMixin {
+  JobsDao(super.db);
+
+  /// The engine-facing face of this DAO.
+  late final jobs.JobStore store = _DriftJobStore(this);
+
+  jobs.Job _toJob(JobRow r) => jobs.Job(
+    id: r.id,
+    kind: r.kind,
+    state: jobs.JobState.values.byName(r.state),
+    checkpoint: r.checkpoint,
+    totalUnits: r.totalUnits,
+    doneUnits: r.doneUnits,
+    createdAtMs: r.createdAtMs,
+  );
+
+  Future<jobs.Job?> load(String jobId) async {
+    final r = await (select(
+      jobsTable,
+    )..where((j) => j.id.equals(jobId))).getSingleOrNull();
+    return r == null ? null : _toJob(r);
+  }
+
+  Future<void> save(jobs.Job job) => into(jobsTable).insertOnConflictUpdate(
+    JobsTableCompanion.insert(
+      id: job.id,
+      kind: job.kind,
+      state: job.state.name,
+      checkpoint: Value(job.checkpoint),
+      totalUnits: job.totalUnits,
+      doneUnits: job.doneUnits,
+      createdAtMs: job.createdAtMs,
+      failureReason: job.state == jobs.JobState.failed
+          ? const Value.absent()
+          : const Value(null),
+    ),
+  );
+
+  Future<void> setFailureReason(String jobId, String reason) =>
+      (update(jobsTable)..where((j) => j.id.equals(jobId))).write(
+        JobsTableCompanion(failureReason: Value(reason)),
+      );
+
+  Future<void> saveCheckpoint(String jobId, String checkpoint, int doneUnits) =>
+      transaction(() async {
+        final r = await (select(
+          jobsTable,
+        )..where((j) => j.id.equals(jobId))).getSingleOrNull();
+        if (r == null) {
+          throw StateError('saveCheckpoint for unknown job “$jobId”');
+        }
+        await (update(jobsTable)..where((j) => j.id.equals(jobId))).write(
+          JobsTableCompanion(
+            checkpoint: Value(checkpoint),
+            doneUnits: Value(doneUnits),
+          ),
+        );
+      });
+
+  Future<void> deleteJob(String jobId) =>
+      (delete(jobsTable)..where((j) => j.id.equals(jobId))).go();
+
+  Future<void> setPayload(String jobId, String payloadJson) =>
+      (update(jobsTable)..where((j) => j.id.equals(jobId))).write(
+        JobsTableCompanion(payloadJson: Value(payloadJson)),
+      );
+
+  Future<String> payloadOf(String jobId) async => (await (select(
+    jobsTable,
+  )..where((j) => j.id.equals(jobId))).getSingle()).payloadJson;
+
+  /// Once decode has revealed the window plan, the placeholder row learns
+  /// its real unit count — before that, the runner would refuse the shape.
+  Future<void> setTotalUnits(String jobId, int totalUnits) =>
+      (update(jobsTable)..where((j) => j.id.equals(jobId))).write(
+        JobsTableCompanion(totalUnits: Value(totalUnits)),
+      );
+
+  /// Every job that is not done — running (possibly orphaned by a kill),
+  /// cancelled, failed. These are the resume cards the UI shows on reopen.
+  Future<List<JobRow>> unfinished() =>
+      (select(jobsTable)
+            ..where((j) => j.state.equals(jobs.JobState.done.name).not())
+            ..orderBy([(j) => OrderingTerm.asc(j.createdAtMs)]))
+          .get();
+}
+
+class _DriftJobStore implements jobs.JobStore {
+  final JobsDao dao;
+  _DriftJobStore(this.dao);
+
+  @override
+  Future<jobs.Job?> load(String jobId) => dao.load(jobId);
+
+  @override
+  Future<void> save(jobs.Job job) => dao.save(job);
+
+  @override
+  Future<void> saveCheckpoint(String jobId, String checkpoint, int doneUnits) =>
+      dao.saveCheckpoint(jobId, checkpoint, doneUnits);
+
+  @override
+  Future<void> delete(String jobId) => dao.deleteJob(jobId);
+}
+
+@DriftAccessor(tables: [DeviceSettings])
+class DeviceSettingsDao extends DatabaseAccessor<AppDatabase>
+    with _$DeviceSettingsDaoMixin {
+  DeviceSettingsDao(super.db);
+
+  static const _lastProfile = 'last_profile_id';
+
+  Future<String?> read(String key) async =>
+      (await (select(deviceSettings)..where((r) => r.key.equals(key)))
+              .getSingleOrNull())
+          ?.value;
+
+  Future<void> write(String key, String value) => into(deviceSettings)
+      .insertOnConflictUpdate(
+          DeviceSettingsCompanion.insert(key: key, value: value));
+
+  Future<void> clear(String key) =>
+      (delete(deviceSettings)..where((r) => r.key.equals(key))).go();
+
+  /// The reader this device last had open, so a cold launch opens into
+  /// their library instead of asking "Who's reading?" every time. A stale
+  /// id (the reader was removed, or a restore replaced everyone) is the
+  /// caller's to check against the profiles that exist.
+  Future<int?> lastProfileId() async =>
+      int.tryParse(await read(_lastProfile) ?? '');
+
+  Future<void> setLastProfileId(int? id) =>
+      id == null ? clear(_lastProfile) : write(_lastProfile, '$id');
+}
+
+@DriftAccessor(tables: [WordLedger])
+class LedgerDao extends DatabaseAccessor<AppDatabase> with _$LedgerDaoMixin {
+  LedgerDao(super.db);
+
+  /// Adds [word] for [profileId], case-insensitively idempotent: a word the
+  /// profile already keeps returns the existing row's id and writes nothing
+  /// (the column's NOCASE collation makes the equality below fold case in
+  /// SQLite itself). Returns the row id either way.
+  Future<int> add({
+    required int profileId,
+    required String word,
+    String? lang,
+    int? sourceWorkId,
+    required int nowMs,
+  }) => transaction(() async {
+    final existing =
+        await (select(wordLedger)..where(
+              (w) => w.profileId.equals(profileId) & w.word.equals(word),
+            ))
+            .getSingleOrNull();
+    if (existing != null) return existing.id;
+    return into(wordLedger).insert(
+      WordLedgerCompanion.insert(
+        profileId: profileId,
+        word: word,
+        lang: Value(lang),
+        sourceWorkId: Value(sourceWorkId),
+        addedAtMs: nowMs,
+      ),
+    );
+  });
+
+  Future<void> remove(int id) =>
+      (delete(wordLedger)..where((w) => w.id.equals(id))).go();
+
+  /// One profile's ledger, newest first — the most recent catch on top.
+  Future<List<WordLedgerRow>> wordsOf(int profileId) =>
+      (select(wordLedger)
+            ..where((w) => w.profileId.equals(profileId))
+            ..orderBy([
+              (w) => OrderingTerm.desc(w.addedAtMs),
+              (w) => OrderingTerm.desc(w.id),
+            ]))
+          .get();
+}
+
+@DriftAccessor(tables: [Profiles, ReadingDays])
+class ProfilesDao extends DatabaseAccessor<AppDatabase>
+    with _$ProfilesDaoMixin {
+  ProfilesDao(super.db);
+  Future<int> create(String name) =>
+      into(profiles).insert(ProfilesCompanion.insert(name: name));
+
+  Future<List<Profile>> all() =>
+      (select(profiles)..orderBy([(p) => OrderingTerm.asc(p.id)])).get();
+
+  /// ADR-0006's settings escape: false (the honest default — see
+  /// [Profiles.preferSystemVoice]) for a profile no row exists for yet.
+  Future<bool> preferSystemVoice(int profileId) async {
+    final row = await (select(
+      profiles,
+    )..where((p) => p.id.equals(profileId))).getSingleOrNull();
+    return row?.preferSystemVoice ?? false;
+  }
+
+  Future<void> setPreferSystemVoice(int profileId, bool value) =>
+      (update(profiles)..where((p) => p.id.equals(profileId))).write(
+        ProfilesCompanion(preferSystemVoice: Value(value)),
+      );
+
+  /// 'fsrs' (the default — see [Profiles.scheduler]) for a profile no row
+  /// exists for yet.
+  Future<String> scheduler(int profileId) async {
+    final row = await (select(
+      profiles,
+    )..where((p) => p.id.equals(profileId))).getSingleOrNull();
+    return row?.scheduler ?? 'fsrs';
+  }
+
+  Future<void> setScheduler(int profileId, String value) =>
+      (update(profiles)..where((p) => p.id.equals(profileId))).write(
+        ProfilesCompanion(scheduler: Value(value)),
+      );
+
+  /// The queue's finish law (P4 mercy #3): false — matching
+  /// [Profiles.keepFinishedInQueue]'s own default — for a profile no row
+  /// exists for yet.
+  Future<bool> keepFinishedInQueue(int profileId) async {
+    final row = await (select(
+      profiles,
+    )..where((p) => p.id.equals(profileId))).getSingleOrNull();
+    return row?.keepFinishedInQueue ?? false;
+  }
+
+  Future<void> setKeepFinishedInQueue(int profileId, bool value) =>
+      (update(profiles)..where((p) => p.id.equals(profileId))).write(
+        ProfilesCompanion(keepFinishedInQueue: Value(value)),
+      );
+
+  /// The offline DSP preprocess's (Campaign 6, ADR-0012) household default:
+  /// false — matching [Profiles.dspGlobalDefault]'s own default — for a
+  /// profile no row exists for yet.
+  Future<bool> dspGlobalDefault(int profileId) async {
+    final row = await (select(
+      profiles,
+    )..where((p) => p.id.equals(profileId))).getSingleOrNull();
+    return row?.dspGlobalDefault ?? false;
+  }
+
+  Future<void> setDspGlobalDefault(int profileId, bool value) =>
+      (update(profiles)..where((p) => p.id.equals(profileId))).write(
+        ProfilesCompanion(dspGlobalDefault: Value(value)),
+      );
+
+  /// Records an open of Latest at [nowMs] and returns the open before it
+  /// (null on the first), which is where the "new since" divider goes.
+  Future<int?> swapLatestSeen(int profileId, {required int nowMs}) =>
+      transaction(() async {
+        final row = await (select(profiles)
+              ..where((p) => p.id.equals(profileId)))
+            .getSingleOrNull();
+        await (update(profiles)..where((p) => p.id.equals(profileId)))
+            .write(ProfilesCompanion(latestSeenAtMs: Value(nowMs)));
+        return row?.latestSeenAtMs;
+      });
+
+  /// The Campaign-4 prefs blob (see [Profiles.readerPrefsJson]) — all
+  /// defaults for a profile no row exists for yet.
+  Future<ReaderPrefs> readerPrefs(int profileId) async {
+    final row = await (select(profiles)..where((p) => p.id.equals(profileId)))
+        .getSingleOrNull();
+    return ReaderPrefs.decode(row?.readerPrefsJson ?? '{}');
+  }
+
+  /// Replaces the whole blob. App code changes it through
+  /// [updateReaderPrefs] instead, so it never writes back a stale copy.
+  Future<void> setReaderPrefs(int profileId, ReaderPrefs prefs) =>
+      (update(profiles)..where((p) => p.id.equals(profileId)))
+          .write(ProfilesCompanion(readerPrefsJson: Value(prefs.encode())));
+
+  /// The one way to change the shared blob: [change] is applied to what is
+  /// stored now, inside a transaction, so the player, the reader and the
+  /// typography screen never write back a copy read before another of
+  /// them wrote (1.5.9: a stale typography save brought a closed bar back).
+  Future<void> updateReaderPrefs(
+          int profileId, ReaderPrefs Function(ReaderPrefs) change) =>
+      transaction(() async {
+        final prefs = await readerPrefs(profileId);
+        final next = change(prefs);
+        if (next.encode() == prefs.encode()) return;
+        await setReaderPrefs(profileId, next);
+      });
+
+  /// Campaign 9 Phase 2 ("resume after restart"): records [workId] as the
+  /// most recently played work, in the SAME shared blob [readerPrefs]
+  /// already owns; whatever else lives there (typography, the reader's
+  /// session) rides along untouched.
+  Future<void> recordLastPlayed(int profileId, int workId) =>
+      updateReaderPrefs(profileId,
+          (p) => p.copyWith(lastPlayedWorkId: workId, playerClosed: false));
+
+  /// The bar's X: the last-played work is kept (the widget's Play reads
+  /// it) but a launch no longer brings the bar back.
+  Future<void> recordPlayerClosed(int profileId) =>
+      updateReaderPrefs(profileId, (p) => p.copyWith(playerClosed: true));
+
+  /// Campaign 4 Phase 5's write side (see [ReadingDays]'s own doc comment
+  /// for why this table exists at all): idempotent by the composite
+  /// (profileId, epochDay) primary key, so a work reopened many times in
+  /// one UTC day still records that day exactly once. `insertOrIgnore`
+  /// over an upsert on purpose — there is nothing on the row worth
+  /// overwriting once it exists.
+  Future<void> recordReadingDay(int profileId, int epochDay) => into(
+          readingDays)
+      .insert(
+          ReadingDaysCompanion.insert(profileId: profileId, epochDay: epochDay),
+          mode: InsertMode.insertOrIgnore);
+}
+
+@DriftAccessor(
+    tables: [Works, Segments, Layers, Alignments, Positions, Episodes,
+        PlayerPositions, Captures, QueueTable, TranslationSentences,
+        Audiobooks, AudiobookFiles, WorkNotes, SegmentLinks])
+class SpineDao extends DatabaseAccessor<AppDatabase> with _$SpineDaoMixin {
+  SpineDao(super.db);
+
+  /// Every language a work of [profileId]'s, a show it follows, or a
+  /// translation it holds names: the languages Settings offers a
+  /// read-aloud voice for.
+  Future<Set<String>> langsInUse(int profileId) async {
+    final rows = await customSelect(
+      'SELECT lang AS l FROM works WHERE profile_id = ?1 AND lang IS NOT NULL '
+      'UNION SELECT language AS l FROM feeds '
+      'WHERE profile_id = ?1 AND language IS NOT NULL '
+      // A translation is a language the reader meets too: a Russian
+      // translation of an English episode names no Russian work or show.
+      'UNION SELECT t.lang AS l FROM translation_sentences t '
+      'JOIN works w ON w.id = t.work_id WHERE w.profile_id = ?1 '
+      "UNION SELECT y.lang AS l FROM layers y "
+      "JOIN works w ON w.id = y.work_id WHERE w.profile_id = ?1 "
+      "AND y.kind = 'mt'",
+      variables: [Variable.withInt(profileId)],
+    ).get();
+    return {for (final r in rows) r.read<String>('l')};
+  }
+
+  Future<int> insertWork({
+    required int profileId,
+    required String kind,
+    required String title,
+    required String persistence,
+    required int firstSeenEpochDay,
+    String? sourceUrl,
+    String? lang,
+  }) => into(works).insert(
+    WorksCompanion.insert(
+      profileId: profileId,
+      kind: kind,
+      title: title,
+      persistence: persistence,
+      firstSeenEpochDay: firstSeenEpochDay,
+      sourceUrl: Value(sourceUrl),
+      lang: Value(lang),
+    ),
+  );
+
+  /// A work's body replaced whole, keeping its id and every row that
+  /// points at it (Latest, the queue): a shared link becoming the article
+  /// it links to. The reading place goes with the old body.
+  Future<void> replaceBody(
+    int workId, {
+    required String kind,
+    required String title,
+    required List<({int idx, String kind, String text})> rows,
+    List<LinkRow> links = const [],
+  }) => transaction(() async {
+    await (delete(positions)..where((p) => p.workId.equals(workId))).go();
+    await (delete(segmentLinks)..where((x) => x.workId.equals(workId))).go();
+    await (delete(segments)..where((x) => x.workId.equals(workId))).go();
+    await insertSegments(workId, rows);
+    await insertLinks(workId, links);
+    await (update(works)..where((w) => w.id.equals(workId))).write(
+      WorksCompanion(kind: Value(kind), title: Value(title)),
+    );
+  });
+
+  /// Stores [links] for [workId], numbered in the order given.
+  Future<void> insertLinks(int workId, List<LinkRow> links) {
+    if (links.isEmpty) return Future.value();
+    final ord = <int, int>{};
+    return batch(
+      (b) => b.insertAll(segmentLinks, [
+        for (final l in links)
+          SegmentLinksCompanion.insert(
+            workId: workId,
+            segIdx: l.segIdx,
+            ord: ord.update(l.segIdx, (n) => n + 1, ifAbsent: () => 0),
+            startChar: l.start,
+            endChar: l.end,
+            href: l.href,
+          ),
+      ]),
+    );
+  }
+
+  /// [workId]'s links in text order.
+  Future<List<SegmentLink>> linksOf(int workId) =>
+      (select(segmentLinks)
+            ..where((l) => l.workId.equals(workId))
+            ..orderBy([
+              (l) => OrderingTerm.asc(l.segIdx),
+              (l) => OrderingTerm.asc(l.ord),
+            ]))
+          .get();
+
+  /// The page [href] points to, as kept on this device for [profileId].
+  Future<Work?> keptCopyOf(int profileId, String href) =>
+      (select(works)
+            ..where(
+              (w) =>
+                  w.profileId.equals(profileId) &
+                  w.kind.equals(keptCopyKind) &
+                  w.sourceUrl.equals(keptKeyOf(href)),
+            )
+            ..limit(1))
+          .getSingleOrNull();
+
+  /// [keptCopyOf] for many addresses: each one that has a copy, keyed by
+  /// the address as given.
+  Future<Map<String, Work>> keptCopiesFor(
+    int profileId,
+    Iterable<String> hrefs,
+  ) async {
+    final rows = await (select(works)
+          ..where(
+            (w) => w.profileId.equals(profileId) & w.kind.equals(keptCopyKind),
+          ))
+        .get();
+    final byKey = {for (final w in rows) w.sourceUrl: w};
+    return {
+      for (final h in hrefs) h: ?byKey[keptKeyOf(h)],
+    };
+  }
+
+  /// Keeps a copy of the page at [href]: a [keptCopyKind] work dated
+  /// [epochDay], with its own text and links. A page already kept is
+  /// left as it is and its id returned.
+  Future<int> storeKeptCopy({
+    required int profileId,
+    required String href,
+    required String title,
+    required int epochDay,
+    required List<({int idx, String kind, String text})> rows,
+    List<LinkRow> links = const [],
+  }) => transaction(() async {
+    final have = await keptCopyOf(profileId, href);
+    if (have != null) return have.id;
+    final id = await insertWork(
+      profileId: profileId,
+      kind: keptCopyKind,
+      title: title,
+      persistence: 'work',
+      firstSeenEpochDay: epochDay,
+      sourceUrl: keptKeyOf(href),
+    );
+    await insertSegments(id, rows);
+    await insertLinks(id, links);
+    return id;
+  });
+
+  /// Each kept copy a text reaches, through its links or through another
+  /// kept copy's, with the text it counts under: the oldest text (lowest
+  /// id) that reaches it, so a page two texts cite counts once. [direct]
+  /// holds, per copy, how many texts link to it themselves.
+  Future<({Map<int, int> ownerOf, Set<int> keptIds, Map<int, int> direct})>
+      _keptCopyOwners() async {
+    final kept = await (select(works)
+          ..where((w) => w.kind.equals(keptCopyKind)))
+        .get();
+    if (kept.isEmpty) {
+      return (ownerOf: <int, int>{}, keptIds: <int>{}, direct: <int, int>{});
+    }
+    final keptIds = {for (final w in kept) w.id};
+    final copyOf = {
+      for (final w in kept) (w.profileId, w.sourceUrl ?? ''): w.id,
+    };
+    final profileOf = <int, int>{};
+    final hrefsOf = <int, List<String>>{};
+    final rows = await customSelect(
+      'SELECT l.work_id AS w, w.profile_id AS p, l.href AS h '
+      'FROM segment_links l JOIN works w ON w.id = l.work_id',
+    ).get();
+    for (final r in rows) {
+      final w = r.read<int>('w');
+      profileOf[w] = r.read<int>('p');
+      hrefsOf.putIfAbsent(w, () => []).add(r.read<String>('h'));
+    }
+    final ownerOf = <int, int>{};
+    final direct = <int, int>{};
+    final texts = [
+      for (final w in hrefsOf.keys)
+        if (!keptIds.contains(w)) w,
+    ]..sort();
+    for (final text in texts) {
+      final cited = <int>{
+        for (final h in hrefsOf[text]!)
+          ?copyOf[(profileOf[text]!, keptKeyOf(h))],
+      };
+      for (final c in cited) {
+        direct[c] = (direct[c] ?? 0) + 1;
+      }
+      // A copy an older text owns has its own reach owned already.
+      final todo = [
+        for (final c in cited)
+          if (!ownerOf.containsKey(c)) c,
+      ];
+      for (final c in todo) {
+        ownerOf[c] = text;
+      }
+      while (todo.isNotEmpty) {
+        final w = todo.removeLast();
+        for (final h in hrefsOf[w] ?? const <String>[]) {
+          final c = copyOf[(profileOf[w]!, keptKeyOf(h))];
+          if (c != null && !ownerOf.containsKey(c)) {
+            ownerOf[c] = text;
+            todo.add(c);
+          }
+        }
+      }
+    }
+    return (ownerOf: ownerOf, keptIds: keptIds, direct: direct);
+  }
+
+  /// Kept copies no remaining text reaches, through its links or through
+  /// another kept copy's: they go with the last text that cited them.
+  Future<List<int>> _unreachedKeptCopies() async {
+    final o = await _keptCopyOwners();
+    return [
+      for (final id in o.keptIds)
+        if (!o.ownerOf.containsKey(id)) id,
+    ];
+  }
+
+  /// The kept pages each text holds on this device (the storage page):
+  /// the copies counted under it, their size (text and link addresses)
+  /// and whether another text links to one of them too ([shared]). Only
+  /// text [workId]'s when given.
+  Future<List<({int workId, List<int> copyIds, int bytes, bool shared})>>
+      keptPagesByText({int? workId}) async {
+    final o = await _keptCopyOwners();
+    final byText = <int, List<int>>{};
+    o.ownerOf.forEach((copy, text) {
+      if (workId == null || text == workId) {
+        byText.putIfAbsent(text, () => []).add(copy);
+      }
+    });
+    if (byText.isEmpty) return const [];
+    final ids = [for (final l in byText.values) ...l];
+    final size = <int, int>{};
+    for (final c in chunksForSql(ids)) {
+      final marks = List.filled(c.length, '?').join(',');
+      final rows = await customSelect(
+          'SELECT work_id, SUM(n) AS bytes FROM ('
+          ' SELECT work_id, LENGTH(CAST(body AS BLOB)) AS n FROM segments'
+          ' WHERE work_id IN ($marks)'
+          ' UNION ALL'
+          ' SELECT work_id, LENGTH(CAST(href AS BLOB)) FROM segment_links'
+          ' WHERE work_id IN ($marks)'
+          ') GROUP BY work_id',
+          variables: [
+            for (final id in [...c, ...c]) Variable.withInt(id),
+          ],
+          readsFrom: {segments, segmentLinks}).get();
+      for (final r in rows) {
+        size[r.read<int>('work_id')] = r.read<int>('bytes');
+      }
+    }
+    return [
+      for (final MapEntry(key: text, value: copies) in byText.entries)
+        (
+          workId: text,
+          copyIds: copies..sort(),
+          bytes: copies.fold(0, (a, c) => a + (size[c] ?? 0)),
+          shared: copies.any((c) => (o.direct[c] ?? 0) > 1),
+        ),
+    ];
+  }
+
+  /// Deletes the kept copies among [workIds]; any other work among them
+  /// stays. A copy reached only through one of them goes too.
+  Future<void> deleteKeptCopies(Iterable<int> workIds) async {
+    final ids = workIds.toSet().toList();
+    final kept = <int>[];
+    for (final c in chunksForSql(ids)) {
+      kept.addAll(await (selectOnly(works)
+            ..addColumns([works.id])
+            ..where(works.id.isIn(c) & works.kind.equals(keptCopyKind)))
+          .map((r) => r.read(works.id)!)
+          .get());
+    }
+    await deleteWorks(kept);
+  }
+
+  Future<void> insertSegments(
+    int workId,
+    List<({int idx, String kind, String text})> rows,
+  ) => batch(
+    (b) => b.insertAll(segments, [
+      for (final r in rows)
+        SegmentsCompanion.insert(
+          workId: workId,
+          idx: r.idx,
+          kind: r.kind,
+          body: r.text,
+        ),
+    ]),
+  );
+
+  Future<void> insertLayers(
+    int workId,
+    List<({int segmentIdx, String lang, String kind, String text})> rows,
+  ) => batch(
+    (b) => b.insertAll(layers, [
+      for (final r in rows)
+        LayersCompanion.insert(
+          workId: workId,
+          segmentIdx: r.segmentIdx,
+          lang: r.lang,
+          kind: r.kind,
+          body: r.text,
+        ),
+    ]),
+  );
+
+  Future<List<Segment>> segmentsOf(int workId) =>
+      (select(segments)
+            ..where((s) => s.workId.equals(workId))
+            ..orderBy([(s) => OrderingTerm.asc(s.idx)]))
+          .get();
+
+  Future<List<Layer>> layersOf(int workId, {required String lang}) =>
+      (select(layers)
+            ..where((l) => l.workId.equals(workId) & l.lang.equals(lang))
+            ..orderBy([(l) => OrderingTerm.asc(l.segmentIdx)]))
+          .get();
+
+  /// The languages a work's layers of [kind] speak — what the reader's
+  /// language toggle offers (ADR-0002: translations are per-segment layers).
+  Future<List<String>> layerLangsOf(int workId, {required String kind}) async {
+    final q = selectOnly(layers, distinct: true)
+      ..addColumns([layers.lang])
+      ..where(layers.workId.equals(workId) & layers.kind.equals(kind))
+      ..orderBy([OrderingTerm.asc(layers.lang)]);
+    final rows = await q.get();
+    return [for (final r in rows) r.read(layers.lang)!];
+  }
+
+  Future<List<Work>> worksOf(int profileId) =>
+      (select(works)..where((w) => w.profileId.equals(profileId))).get();
+
+  Future<Work?> workById(int id) =>
+      (select(works)..where((w) => w.id.equals(id))).getSingleOrNull();
+
+  /// The Subscriptions page's Books shelf (ADR-0016): every book the
+  /// library shows, with its reading cursor and length for progress. One
+  /// query, so the shelf costs the same with three books or three hundred.
+  Future<List<({Work work, int segmentCount, Position? position})>>
+      booksOf(int profileId) async {
+    final count = subqueryExpression<int>(selectOnly(segments)
+      ..addColumns([countAll()])
+      ..where(segments.workId.equalsExp(works.id)));
+    final q = select(works).join([
+      leftOuterJoin(
+          positions,
+          positions.workId.equalsExp(works.id) &
+              positions.profileId.equals(profileId)),
+    ])
+      ..addColumns([count])
+      ..where(works.profileId.equals(profileId) &
+          works.kind.equals('book') &
+          works.persistence.isNotValue('ephemeron'));
+    return [
+      for (final r in await q.get())
+        (
+          work: r.readTable(works),
+          segmentCount: r.read(count) ?? 0,
+          position: r.readTableOrNull(positions),
+        )
+    ];
+  }
+
+  /// Pin is a user's hand on the work (ADR-0002); callers promoting via pin
+  /// pair this with [promoteWork].
+  Future<void> setPinned(int workId, bool pinned) =>
+      (update(works)..where((w) => w.id.equals(workId))).write(
+        WorksCompanion(pinned: Value(pinned)),
+      );
+
+  /// Segment count without loading bodies — the library's progress
+  /// denominator (position.segmentIdx / segmentCount).
+  Future<int> segmentCount(int workId) async {
+    final c = countAll();
+    final q = selectOnly(segments)
+      ..addColumns([c])
+      ..where(segments.workId.equals(workId));
+    return (await q.getSingle()).read(c) ?? 0;
+  }
+
+  /// One tiny row per (profile, work) — the donor's rewrite-the-book jank is
+  /// structurally impossible (spine_db_test pins the row count).
+  ///
+  /// [readAtMs] is for a place read before an await and written after it
+  /// (the player's X): the row is stamped with when the place was true,
+  /// and a row another writer moved on since is left alone.
+  Future<void> savePosition({
+    required int profileId,
+    required int workId,
+    required int segmentIdx,
+    required int wordIdx,
+    required String lastModality,
+    int? readAtMs,
+  }) {
+    final row = PositionsCompanion.insert(
+      profileId: profileId,
+      workId: workId,
+      segmentIdx: segmentIdx,
+      wordIdx: wordIdx,
+      lastModality: lastModality,
+      updatedAtMs: readAtMs ?? DateTime.now().millisecondsSinceEpoch,
+    );
+    if (readAtMs == null) return into(positions).insertOnConflictUpdate(row);
+    return into(positions).insert(row,
+        onConflict: DoUpdate((_) => row,
+            where: (old) => old.updatedAtMs.isSmallerOrEqualValue(readAtMs)));
+  }
+
+  Future<Position?> position({required int profileId, required int workId}) =>
+      (select(positions)..where(
+            (p) => p.profileId.equals(profileId) & p.workId.equals(workId),
+          ))
+          .getSingleOrNull();
+
+  Future<List<Position>> allPositions() => select(positions).get();
+
+  /// Fires whenever anyone's place in anything moves: the home-screen
+  /// widget's "Continue reading" follows it (1.5.5). A bare table signal,
+  /// not a watched query: nothing is re-read until the listener asks.
+  Stream<void> positionsMoved() =>
+      db.tableUpdates(TableUpdateQuery.onTable(positions)).map((_) {});
+
+  /// The text this reader was in last, with its place and length: a work
+  /// whose position moved most recently and that is read, not listened
+  /// to (isTextWork's rule: no audiobook, no episode with audio). Null
+  /// when nothing has been read.
+  Future<({Work work, Position position, int segmentCount})?>
+      lastReadText(int profileId) async {
+    final q = select(positions).join([
+      innerJoin(works, works.id.equalsExp(positions.workId)),
+      leftOuterJoin(episodes, episodes.workId.equalsExp(positions.workId)),
+    ])
+      ..where(positions.profileId.equals(profileId) &
+          works.kind.isNotValue('audiobook') &
+          episodes.enclosureUrl.isNull())
+      ..orderBy([OrderingTerm.desc(positions.updatedAtMs)])
+      ..limit(1);
+    final row = await q.getSingleOrNull();
+    if (row == null) return null;
+    final work = row.readTable(works);
+    return (
+      work: work,
+      position: row.readTable(positions),
+      segmentCount: await segmentCount(work.id),
+    );
+  }
+
+  /// Every place this reader has in a text, by work: one query for a
+  /// whole list's progress bars.
+  Future<Map<int, Position>> positionsOf(int profileId) async => {
+    for (final p in await (select(
+      positions,
+    )..where((p) => p.profileId.equals(profileId))).get())
+      p.workId: p,
+  };
+
+  /// How many segments and characters each of [workIds] holds, without
+  /// loading a body: a list's reading times and progress denominators in
+  /// one query per [_inChunk] ids. A work with no text is absent.
+  Future<Map<int, TextSize>> textSizesOf(Iterable<int> workIds) async {
+    final count = segments.idx.count();
+    final chars = segments.body.length.sum();
+    final out = <int, TextSize>{};
+    for (final chunk in _chunks(workIds)) {
+      final q = selectOnly(segments)
+        ..addColumns([segments.workId, count, chars])
+        ..where(segments.workId.isIn(chunk))
+        ..groupBy([segments.workId]);
+      for (final r in await q.get()) {
+        out[r.read(segments.workId)!] =
+            (segments: r.read(count) ?? 0, chars: r.read(chars) ?? 0);
+      }
+    }
+    return out;
+  }
+
+  Future<void> insertAlignments(
+    int workId,
+    List<({int segmentIdx, int tStartMs, int tEndMs})> rows,
+  ) => batch(
+    (b) => b.insertAll(alignments, [
+      for (final r in rows)
+        AlignmentsCompanion.insert(
+          workId: workId,
+          segmentIdx: r.segmentIdx,
+          tStartMs: r.tStartMs,
+          tEndMs: r.tEndMs,
+        ),
+    ]),
+  );
+
+  Future<List<Alignment>> alignmentsOf(int workId) =>
+      (select(alignments)
+            ..where((a) => a.workId.equals(workId))
+            ..orderBy([(a) => OrderingTerm.asc(a.tStartMs)]))
+          .get();
+
+  Future<void> promoteWork(int workId) =>
+      (update(works)..where((w) => w.id.equals(workId))).write(
+        const WorksCompanion(persistence: Value('work')),
+      );
+
+  /// Undo's restore path for [promoteWork] (Campaign 5's Keep is undoable):
+  /// writes persistence back to whatever it was, verbatim — a work already
+  /// promoted before the Keep must stay promoted after Undo, not get
+  /// demoted.
+  Future<void> setPersistence(int workId, String persistence) =>
+      (update(works)..where((w) => w.id.equals(workId)))
+          .write(WorksCompanion(persistence: Value(persistence)));
+
+  /// Finishing is one of the user's promoting hands (ADR-0003 law 2);
+  /// callers pair this with [promoteWork].
+  Future<void> markFinished(int workId, int epochDay) =>
+      (update(works)..where((w) => w.id.equals(workId))).write(
+        WorksCompanion(finishedEpochDay: Value(epochDay)),
+      );
+
+  /// Undoes a finish, by hand or by ear: the work's day and, for a feed
+  /// item, its played fact.
+  Future<void> markUnfinished(int workId) => transaction(() async {
+        await (update(works)..where((w) => w.id.equals(workId)))
+            .write(const WorksCompanion(finishedEpochDay: Value(null)));
+        await (update(episodes)..where((e) => e.workId.equals(workId)))
+            .write(const EpisodesCompanion(finishedAtMs: Value(null)));
+      });
+
+  Future<void> deleteWork(int workId) => deleteWorks([workId]);
+
+  /// The Library's Remove. A feed item is demoted, never deleted: Latest
+  /// is a permanent archive (ADR-0019 §1), so it leaves the Library and
+  /// keeps its place there, with its transcript, captures and position.
+  /// Anything with no feed row is deleted outright. Returns whether the
+  /// work was deleted, so the caller knows whether files it owns on disk
+  /// must go too.
+  Future<bool> removeFromLibrary(int workId) => transaction(() async {
+        final fromFeed = await (select(episodes)
+                  ..where((e) => e.workId.equals(workId)))
+                .getSingleOrNull() !=
+            null;
+        if (!fromFeed) {
+          await deleteWorks([workId]);
+          return true;
+        }
+        await (update(works)..where((w) => w.id.equals(workId))).write(
+            const WorksCompanion(
+                persistence: Value('ephemeron'), pinned: Value(false)));
+        return false;
+      });
+
+  /// Deletes [workIds] and every row hanging off them in one transaction,
+  /// one statement per table per chunk: an unfollow or a fold can take
+  /// thousands at once, and a per-work loop was a few dozen statements
+  /// each.
+  Future<void> deleteWorks(Iterable<int> workIds) {
+    final asked = workIds.toSet().toList();
+    if (asked.isEmpty) return Future.value();
+    return transaction(() async {
+      // A version is part of its original: it goes with it.
+      final ids = {...asked};
+      for (final c in chunksForSql(asked)) {
+        ids.addAll(await (selectOnly(db.versions)
+              ..addColumns([db.versions.workId])
+              ..where(db.versions.originalId.isIn(c)))
+            .map((r) => r.read(db.versions.workId)!)
+            .get());
+      }
+      for (final c in chunksForSql(ids.toList())) {
+        await (delete(db.versions)
+              ..where((v) => v.workId.isIn(c) | v.originalId.isIn(c)))
+            .go();
+        // The queue (P4 mercy #3) references works by id under
+        // `PRAGMA foreign_keys = ON` — without this line, deleting a
+        // queued ephemeron or unfollowing its feed throws a foreign-key
+        // violation instead of quietly taking the row with it.
+        await (delete(queueTable)..where((q) => q.workId.isIn(c))).go();
+        await (delete(playerPositions)..where((p) => p.workId.isIn(c))).go();
+        await (delete(captures)..where((x) => x.workId.isIn(c))).go();
+        await (delete(workNotes)..where((n) => n.workId.isIn(c))).go();
+        // Children before the parent audiobooks row — AudiobookFiles rows
+        // carry the DB record of the copied files; the actual bytes on disk
+        // are the caller's job (ADR-0013), mirroring how deleteWork has
+        // never touched a downloaded episode's audio file either.
+        await (delete(audiobookFiles)..where((f) => f.workId.isIn(c))).go();
+        await (delete(audiobooks)..where((a) => a.workId.isIn(c))).go();
+        // Cross-feed dedup (Campaign 5 Phase 3): if anything was
+        // suppressed as a duplicate of a work about to be deleted,
+        // un-suppress it first — a canonical row can vanish (an unfollow)
+        // without taking its duplicate's visibility with
+        // it. "Hidden" must never quietly become "lost".
+        await _clearDedupPointingAt(c);
+        await (delete(episodes)..where((e) => e.workId.isIn(c))).go();
+        await (delete(positions)..where((p) => p.workId.isIn(c))).go();
+        await (delete(alignments)..where((a) => a.workId.isIn(c))).go();
+        await (delete(translationSentences)..where((t) => t.workId.isIn(c)))
+            .go();
+        await (delete(layers)..where((l) => l.workId.isIn(c))).go();
+        await (delete(segmentLinks)..where((x) => x.workId.isIn(c))).go();
+        await (delete(segments)..where((x) => x.workId.isIn(c))).go();
+        await (delete(works)..where((w) => w.id.isIn(c))).go();
+      }
+      // A page kept only because a removed text cited it goes with it.
+      final orphans = await _unreachedKeptCopies();
+      if (orphans.isNotEmpty) await deleteWorks(orphans);
+    });
+  }
+
+  Future<void> _clearDedupPointingAt(List<int> workIds) =>
+      (update(episodes)..where((e) => e.duplicateOfWorkId.isIn(workIds)))
+          .write(const EpisodesCompanion(
+              dedupReason: Value(null), duplicateOfWorkId: Value(null)));
+
+  // ───── translation layers (ADR-0008 "Babel" Phase 3) ─────
+
+  /// Whether the scroll-mode dual display is on for this work. False (the
+  /// honest default — see [Works.showTranslationLayer]) for a work no row
+  /// exists for yet.
+  Future<bool> showTranslationLayer(int workId) async {
+    final row = await (select(works)..where((w) => w.id.equals(workId)))
+        .getSingleOrNull();
+    return row?.showTranslationLayer ?? false;
+  }
+
+  Future<void> setShowTranslationLayer(int workId, bool value) =>
+      (update(works)..where((w) => w.id.equals(workId)))
+          .write(WorksCompanion(showTranslationLayer: Value(value)));
+
+  /// The one active translation target language for this work (Campaign
+  /// 8 "Babel widens" Phase 1) — `null` for a work no row exists for yet
+  /// or that has never had one chosen. See [Works.activeTranslationLang].
+  Future<String?> activeTranslationLang(int workId) async {
+    final row = await (select(works)..where((w) => w.id.equals(workId)))
+        .getSingleOrNull();
+    return row?.activeTranslationLang;
+  }
+
+  /// Sets the one active translation target — replacing whatever was
+  /// active before, never adding a second ("one active translation layer
+  /// per work at a time"). Keeps the legacy [Works.showTranslationLayer]
+  /// bool in sync (turned on) so nothing that still reads it alone sees
+  /// a stale `false` while a language is actually active.
+  Future<void> setActiveTranslationLang(int workId, String lang) =>
+      (update(works)..where((w) => w.id.equals(workId))).write(
+          WorksCompanion(
+              activeTranslationLang: Value(lang),
+              showTranslationLayer: const Value(true)));
+
+  /// Clears the active slot — same sync law as [setActiveTranslationLang],
+  /// in reverse.
+  Future<void> clearActiveTranslationLang(int workId) =>
+      (update(works)..where((w) => w.id.equals(workId))).write(
+          const WorksCompanion(
+              activeTranslationLang: Value(null),
+              showTranslationLayer: Value(false)));
+
+  /// Whether the reader shows this work's translation in place of the
+  /// original. See [Works.translationView].
+  Future<bool> translationOnly(int workId) async {
+    final row = await (select(works)..where((w) => w.id.equals(workId)))
+        .getSingleOrNull();
+    return row?.translationView == 'only';
+  }
+
+  Future<void> setTranslationOnly(int workId, bool only) =>
+      (update(works)..where((w) => w.id.equals(workId)))
+          .write(WorksCompanion(translationView: Value(only ? 'only' : null)));
+
+  /// The target of this work's unfinished translation run, if any. See
+  /// [Works.translationRunLang].
+  Future<String?> translationRunLang(int workId) async {
+    final row = await (select(works)..where((w) => w.id.equals(workId)))
+        .getSingleOrNull();
+    return row?.translationRunLang;
+  }
+
+  Future<void> setTranslationRunLang(int workId, String? lang) =>
+      (update(works)..where((w) => w.id.equals(workId)))
+          .write(WorksCompanion(translationRunLang: Value(lang)));
+
+  /// The languages this work has translated sentences in: what the work
+  /// page lists beside the original.
+  Future<List<String>> translationLangsOf(int workId) async {
+    final q = selectOnly(translationSentences, distinct: true)
+      ..addColumns([translationSentences.lang])
+      ..where(translationSentences.workId.equals(workId))
+      ..orderBy([OrderingTerm.asc(translationSentences.lang)]);
+    return [for (final r in await q.get()) r.read(translationSentences.lang)!];
+  }
+
+  /// Records the mode the work page just opened [workId] in.
+  Future<void> setLastMode(int workId, String mode, int nowMs) =>
+      (update(works)..where((w) => w.id.equals(workId))).write(
+          WorksCompanion(lastMode: Value(mode), lastModeAtMs: Value(nowMs)));
+
+  /// The language the work page opens this work in; null is the
+  /// original. See [Works.readLang].
+  Future<void> setReadLang(int workId, String? lang) =>
+      (update(works)..where((w) => w.id.equals(workId)))
+          .write(WorksCompanion(readLang: Value(lang)));
+
+  /// Deletes [workId]'s transcript (1.5.8): its sentences, timings and
+  /// layers, and with them every translation, which is keyed to those
+  /// sentences, and the reading place over them. The player's place and
+  /// the captures stay, unbound from sentences that are gone (they keep
+  /// their time, and the next transcript binds them again). Transcribing
+  /// again rebuilds the rest.
+  Future<void> deleteTranscript(int workId) => transaction(() async {
+        await (delete(positions)..where((p) => p.workId.equals(workId))).go();
+        await (update(captures)..where((c) => c.workId.equals(workId)))
+            .write(const CapturesCompanion(segmentIdx: Value(null)));
+        await (delete(alignments)..where((a) => a.workId.equals(workId)))
+            .go();
+        await (delete(translationSentences)
+              ..where((t) => t.workId.equals(workId)))
+            .go();
+        await (delete(layers)..where((l) => l.workId.equals(workId))).go();
+        await (delete(segments)..where((x) => x.workId.equals(workId))).go();
+        await (update(works)..where((w) => w.id.equals(workId))).write(
+            const WorksCompanion(
+                activeTranslationLang: Value(null),
+                showTranslationLayer: Value(false),
+                readLang: Value(null),
+                translationView: Value(null),
+                translationRunLang: Value(null)));
+      });
+
+  /// Deletes [workId]'s translation into [lang] (1.5.8), both kinds: the
+  /// reader's sentences and a transcribe-and-translate `mt` layer. Any
+  /// choice naming that language is cleared, including an unfinished
+  /// run, which would otherwise rebuild it on the next open.
+  Future<void> deleteTranslation(int workId, String lang) =>
+      transaction(() async {
+        await (delete(translationSentences)
+              ..where((t) => t.workId.equals(workId) & t.lang.equals(lang)))
+            .go();
+        await (delete(layers)
+              ..where((l) =>
+                  l.workId.equals(workId) &
+                  l.lang.equals(lang) &
+                  l.kind.equals('mt')))
+            .go();
+        final work = await (select(works)..where((w) => w.id.equals(workId)))
+            .getSingleOrNull();
+        if (work == null) return;
+        final active = work.activeTranslationLang == lang;
+        await (update(works)..where((w) => w.id.equals(workId)))
+            .write(WorksCompanion(
+          activeTranslationLang:
+              active ? const Value(null) : const Value.absent(),
+          showTranslationLayer:
+              active ? const Value(false) : const Value.absent(),
+          translationView: active ? const Value(null) : const Value.absent(),
+          readLang:
+              work.readLang == lang ? const Value(null) : const Value.absent(),
+          translationRunLang: work.translationRunLang == lang
+              ? const Value(null)
+              : const Value.absent(),
+        ));
+      });
+
+  /// Everything [deleteTranscript] removes or clears, as raw rows by
+  /// table (1.5.9), so Recently deleted can put it back exactly: the
+  /// segments, timings, layers, every translation, the reading place,
+  /// which sentence each capture was bound to, and the work's translation
+  /// choices. Raw SQL values (blobs included), not data classes, so a
+  /// restore writes back the very values that were read.
+  Future<SnapshotRows> snapshotTranscript(int workId) async => {
+        for (final table in const [
+          'segments',
+          'alignments',
+          'layers',
+          'translation_sentences',
+          'positions',
+        ])
+          table: await _rawRows(
+              'SELECT * FROM $table WHERE work_id = ?', [workId]),
+        'captures': await _rawRows(
+            'SELECT id, segment_idx FROM captures '
+            'WHERE work_id = ? AND segment_idx IS NOT NULL',
+            [workId]),
+        'works': await _rawRows(
+            'SELECT ${_clearedWorkColumns.join(', ')} FROM works '
+            'WHERE id = ?',
+            [workId]),
+        'identity': await _identity(workId),
+      };
+
+  /// Everything [deleteTranslation] removes for [lang]: its sentences,
+  /// its `mt` layer, and only the work's choices that named it.
+  Future<SnapshotRows> snapshotTranslation(int workId, String lang) async {
+    final work = await (select(works)..where((w) => w.id.equals(workId)))
+        .getSingleOrNull();
+    return {
+      'translation_sentences': await _rawRows(
+          'SELECT * FROM translation_sentences '
+          'WHERE work_id = ? AND lang = ?',
+          [workId, lang]),
+      'layers': await _rawRows(
+          "SELECT * FROM layers WHERE work_id = ? AND lang = ? AND kind = 'mt'",
+          [workId, lang]),
+      'works': [
+        if (work != null)
+          {
+            if (work.activeTranslationLang == lang) ...{
+              'active_translation_lang': lang,
+              'show_translation_layer': work.showTranslationLayer ? 1 : 0,
+              'translation_view': work.translationView,
+            },
+            if (work.readLang == lang) 'read_lang': lang,
+            if (work.translationRunLang == lang) 'translation_run_lang': lang,
+          },
+      ],
+      'identity': await _identity(workId),
+      'source': [
+        {'fingerprint': await _sourceFingerprint(workId)},
+      ],
+    };
+  }
+
+  /// Puts back a [snapshotTranscript], in one transaction. Refuses rather
+  /// than mix: a transcript made since stays, and the old one waits.
+  Future<RestoreResult> restoreTranscript(int workId, SnapshotRows rows) =>
+      transaction(() async {
+        if (!await _sameItem(workId, rows)) return RestoreResult.workGone;
+        // Any part of a transcript counts, not just its sentences: a stray
+        // layer or translation row would share keys with the copy, and
+        // skipping those rows would put back a transcript mixed with
+        // another's. Refusing keeps both whole; deleting the newer one
+        // clears every one of these tables, so the copy can then come in.
+        if (await _any(
+            [
+              for (final t in const [
+                'segments',
+                'alignments',
+                'layers',
+                'translation_sentences',
+              ])
+                'SELECT 1 FROM $t WHERE work_id = ?',
+            ].join(' UNION ALL '),
+            [workId, workId, workId, workId])) {
+          return RestoreResult.transcriptExists;
+        }
+        for (final table in const [
+          'segments',
+          'alignments',
+          'layers',
+          'translation_sentences',
+        ]) {
+          await _insertRaw(table, workId, rows[table]);
+        }
+        // A reading place set since (none can be, without sentences) wins.
+        await _insertRaw('positions', workId, rows['positions'],
+            orIgnore: true);
+        for (final c in rows['captures'] ?? const <Map<String, Object?>>[]) {
+          await customUpdate(
+              'UPDATE captures SET segment_idx = ? '
+              'WHERE id = ? AND work_id = ? AND segment_idx IS NULL',
+              variables: [
+                Variable<Object>(c['segment_idx']),
+                Variable<Object>(c['id']),
+                Variable.withInt(workId),
+              ],
+              updates: {captures});
+        }
+        await _restoreWorkChoices(workId, rows['works']);
+        return RestoreResult.restored;
+      });
+
+  /// Puts back a [snapshotTranslation] into [lang], in one transaction.
+  /// Refuses if that language was made again, or if the sentences it is
+  /// keyed to are gone (restore the transcript first) or are no longer the
+  /// ones it was made from.
+  Future<RestoreResult> restoreTranslation(
+          int workId, String lang, SnapshotRows rows) =>
+      transaction(() async {
+        if (!await _sameItem(workId, rows)) return RestoreResult.workGone;
+        if (await _any(
+            'SELECT 1 FROM translation_sentences WHERE work_id = ? AND lang = ? '
+            "UNION ALL SELECT 1 FROM layers WHERE work_id = ? AND lang = ? "
+            "AND kind = 'mt'",
+            [workId, lang, workId, lang])) {
+          return RestoreResult.translationExists;
+        }
+        if (!await _any('SELECT 1 FROM segments WHERE work_id = ?', [workId])) {
+          return RestoreResult.sourceGone;
+        }
+        // Rows are keyed by sentence number, so a transcript made again
+        // would take the old translation onto other sentences.
+        final saved = rows['source'];
+        if (saved == null ||
+            saved.isEmpty ||
+            saved.first['fingerprint'] != await _sourceFingerprint(workId)) {
+          return RestoreResult.sourceChanged;
+        }
+        for (final table in const ['translation_sentences', 'layers']) {
+          await _insertRaw(table, workId, rows[table]);
+        }
+        await _restoreWorkChoices(workId, rows['works']);
+        return RestoreResult.restored;
+      });
+
+  static const _clearedWorkColumns = [
+    'active_translation_lang',
+    'show_translation_layer',
+    'translation_view',
+    'read_lang',
+    'translation_run_lang',
+  ];
+
+  /// Each choice comes back only where nothing was chosen since: the
+  /// active language with its toggle and view as one, the reading
+  /// language, and an unfinished run (the reader resumes it on open).
+  Future<void> _restoreWorkChoices(
+      int workId, List<Map<String, Object?>>? rows) async {
+    final saved = rows == null || rows.isEmpty ? null : rows.first;
+    if (saved == null) return;
+    final now = await (select(works)..where((w) => w.id.equals(workId)))
+        .getSingle();
+    final active = saved['active_translation_lang'] as String?;
+    final readLang = saved['read_lang'] as String?;
+    final runLang = saved['translation_run_lang'] as String?;
+    await (update(works)..where((w) => w.id.equals(workId))).write(
+        WorksCompanion(
+      activeTranslationLang: active != null && now.activeTranslationLang == null
+          ? Value(active)
+          : const Value.absent(),
+      showTranslationLayer: active != null && now.activeTranslationLang == null
+          ? Value(saved['show_translation_layer'] == 1)
+          : const Value.absent(),
+      translationView: active != null && now.activeTranslationLang == null
+          ? Value(saved['translation_view'] as String?)
+          : const Value.absent(),
+      readLang: readLang != null && now.readLang == null
+          ? Value(readLang)
+          : const Value.absent(),
+      translationRunLang: runLang != null && now.translationRunLang == null
+          ? Value(runLang)
+          : const Value.absent(),
+    ));
+  }
+
+  Future<List<Map<String, Object?>>> _rawRows(
+          String sql, List<Object> args) async =>
+      [
+        for (final r in await customSelect(sql,
+                variables: [for (final a in args) Variable<Object>(a)])
+            .get())
+          Map.of(r.data),
+      ];
+
+  Future<bool> _any(String sql, List<Object> args) async =>
+      (await _rawRows(sql, args)).isNotEmpty;
+
+  /// What makes [workId] the item it is, beyond its id: an id can name
+  /// another item after a backup is restored. The title, and an episode's
+  /// guid, which its feed keeps stable.
+  Future<List<Map<String, Object?>>> _identity(int workId) => _rawRows(
+      'SELECT w.title AS title, '
+      '(SELECT guid FROM episodes WHERE work_id = w.id) AS guid '
+      'FROM works w WHERE w.id = ?',
+      [workId]);
+
+  /// Whether [workId] is still the item [rows] were taken from. A copy
+  /// without an identity can't show that it is, so it is treated as gone.
+  Future<bool> _sameItem(int workId, SnapshotRows rows) async {
+    final now = await _identity(workId);
+    final saved = rows['identity'];
+    if (now.isEmpty || saved == null || saved.isEmpty) return false;
+    return now.first['title'] == saved.first['title'] &&
+        now.first['guid'] == saved.first['guid'];
+  }
+
+  /// A hash of [workId]'s sentences, number and text, in order: equal
+  /// only for the same transcript.
+  Future<String> _sourceFingerprint(int workId) async {
+    final rows = await _rawRows(
+        'SELECT idx, body FROM segments WHERE work_id = ? ORDER BY idx',
+        [workId]);
+    return sha256
+        .convert(utf8.encode(jsonEncode([
+          for (final r in rows) [r['idx'], r['body']],
+        ])))
+        .toString();
+  }
+
+  static final _sqlName = RegExp(r'^[a-z_]+$');
+
+  /// Inserts snapshot [rows] into [table] as they were read. Column names
+  /// come from a file on disk, so each is checked to be a plain name, and
+  /// every row is pinned to [workId] whatever the file says.
+  Future<void> _insertRaw(
+      String table, int workId, List<Map<String, Object?>>? rows,
+      {bool orIgnore = false}) async {
+    for (final row in rows ?? const <Map<String, Object?>>[]) {
+      final values = {...row, 'work_id': workId};
+      final columns = values.keys.toList();
+      if (!columns.every(_sqlName.hasMatch)) {
+        throw FormatException('bad column in a $table snapshot');
+      }
+      // Named as written, so open pages (the work page, the home widget's
+      // place) hear the rows come back.
+      await customInsert(
+          'INSERT ${orIgnore ? 'OR IGNORE ' : ''}INTO $table '
+          '(${columns.join(', ')}) '
+          'VALUES (${List.filled(columns.length, '?').join(', ')})',
+          variables: [for (final c in columns) Variable<Object>(values[c])],
+          updates: {
+            attachedDatabase.allTables
+                .firstWhere((t) => t.actualTableName == table),
+          });
+    }
+  }
+
+  /// What each work keeps as text beyond its own body (1.5.8), for the
+  /// storage page: one row per transcribed work (`lang` null: its
+  /// sentences, layers and word timings) and one per translation language.
+  /// Byte lengths of what is stored; the database file only shrinks by
+  /// that much once SQLite reuses or vacuums the pages. [workId] narrows
+  /// it to one work, so its page doesn't measure every transcript.
+  Future<List<({int workId, String? lang, int bytes})>> storedText(
+      {int? workId}) async {
+    final only = workId == null ? '' : 'WHERE work_id = ?';
+    final rows = await customSelect('''
+      SELECT work_id, NULL AS lang, SUM(n) AS bytes FROM (
+        SELECT work_id, LENGTH(CAST(body AS BLOB)) AS n FROM segments
+          WHERE work_id IN (SELECT work_id FROM alignments)
+        UNION ALL
+        SELECT work_id, 16 + IFNULL(LENGTH(word_timings), 0) FROM alignments
+        UNION ALL
+        SELECT work_id, LENGTH(CAST(body AS BLOB)) FROM layers
+          WHERE kind != 'mt'
+      ) $only GROUP BY work_id
+      UNION ALL
+      SELECT work_id, lang, SUM(n) FROM (
+        SELECT work_id, lang,
+            LENGTH(CAST(body AS BLOB)) + LENGTH(CAST(source_text AS BLOB))
+              AS n
+          FROM translation_sentences
+        UNION ALL
+        SELECT work_id, lang, LENGTH(CAST(body AS BLOB)) FROM layers
+          WHERE kind = 'mt'
+      ) $only GROUP BY work_id, lang''',
+        variables: [
+          if (workId != null) ...[Variable.withInt(workId), Variable.withInt(workId)],
+        ],
+        readsFrom: {segments, alignments, layers, translationSentences}).get();
+    return [
+      for (final r in rows)
+        (
+          workId: r.read<int>('work_id'),
+          lang: r.readNullable<String>('lang'),
+          bytes: r.read<int>('bytes'),
+        ),
+    ];
+  }
+
+  /// Sets a work's declared source language (Campaign 8 "Babel widens"
+  /// Phase 1's calm per-work selector — see [Works.lang]). Most intake
+  /// paths never populate this at import time; a reader who knows better
+  /// corrects it here. No auto-detection — recorded ceiling.
+  Future<void> setWorkLang(int workId, String lang) =>
+      (update(works)..where((w) => w.id.equals(workId)))
+          .write(WorksCompanion(lang: Value(lang)));
+
+  /// Persists one translated sentence — idempotent by (workId, segmentIdx,
+  /// sentenceIdx, lang): re-running a unit (a retry, or a resumed job
+  /// re-executing the same unit) overwrites with the same inputs rather
+  /// than duplicating a row.
+  Future<void> upsertTranslationSentence({
+    required int workId,
+    required int segmentIdx,
+    required int sentenceIdx,
+    required String lang,
+    required String sourceText,
+    required String body,
+    String? engine,
+  }) =>
+      into(translationSentences).insertOnConflictUpdate(
+          TranslationSentencesCompanion.insert(
+              workId: workId,
+              segmentIdx: segmentIdx,
+              sentenceIdx: sentenceIdx,
+              lang: lang,
+              sourceText: sourceText,
+              body: body,
+              engine: Value(engine)));
+
+  /// Every translated sentence a work has in [lang], keyed by
+  /// (segmentIdx, sentenceIdx) — the shape the scroll-mode dual display and
+  /// the speak loop's substitution both look sentences up through.
+  Future<Map<(int, int), TranslationSentence>> translationSentencesOf(
+      int workId,
+      {required String lang}) async {
+    final rows = await (select(translationSentences)
+          ..where(
+              (t) => t.workId.equals(workId) & t.lang.equals(lang)))
+        .get();
+    return {
+      for (final r in rows) (r.segmentIdx, r.sentenceIdx): r,
+    };
+  }
+
+  /// The works with at least one sentence in [lang] translated by
+  /// [engine], in one query: what a whole list of one-tap rows asks to
+  /// say where their words would come from.
+  Future<Set<int>> worksTranslatedBy(String lang, String engine) async {
+    final q = selectOnly(translationSentences, distinct: true)
+      ..addColumns([translationSentences.workId])
+      ..where(translationSentences.lang.equals(lang) &
+          translationSentences.engine.equals(engine));
+    return {
+      for (final r in await q.get()) r.read(translationSentences.workId)!,
+    };
+  }
+
+  /// Whether this work has ANY translated sentences in [lang] yet — the
+  /// reader's honesty gate for showing the dual-display toggle at all (a
+  /// work no translation job has ever touched offers nothing to switch on).
+  Future<bool> hasTranslationSentences(int workId, {required String lang}) async {
+    final c = countAll();
+    final q = selectOnly(translationSentences)
+      ..addColumns([c])
+      ..where(translationSentences.workId.equals(workId) &
+          translationSentences.lang.equals(lang));
+    return ((await q.getSingle()).read(c) ?? 0) > 0;
+  }
+}
+
+/// The study crown, Phase 2: captures made during playback. Sentence-snap
+/// binding lives here, over the SAME [core.Spine] projection everything
+/// else in this file uses (positionAtAudioTime) — never a raw ±15s guess.
+@DriftAccessor(tables: [Captures, Alignments])
+class CapturesDao extends DatabaseAccessor<AppDatabase>
+    with _$CapturesDaoMixin {
+  CapturesDao(super.db);
+
+  Future<core.Spine> _spineOf(int workId) async {
+    final rows = await (select(
+      alignments,
+    )..where((a) => a.workId.equals(workId))).get();
+    return core.Spine(
+      segments: const [],
+      layers: const [],
+      alignments: [
+        for (final a in rows)
+          core.Alignment(
+            segmentIdx: a.segmentIdx,
+            tStartMs: a.tStartMs,
+            tEndMs: a.tEndMs,
+          ),
+      ],
+    );
+  }
+
+  /// Saves a capture at [positionMs]. When [workId] already has alignments
+  /// (a transcript exists), binds the sentence containing that position
+  /// immediately; otherwise [segmentIdx] stays null — [backfillForWork]
+  /// binds it once transcription completes. Never a fabricated window.
+  ///
+  /// [fileIdx] (Campaign 7, ADR-0013) names which file of a multi-file
+  /// audiobook [positionMs] is relative to; null (every pre-campaign
+  /// caller) for a single-file work, where [positionMs] alone is already
+  /// unambiguous.
+  Future<int> capture({
+    required int profileId,
+    required int workId,
+    required int positionMs,
+    required int nowMs,
+    int? fileIdx,
+  }) async {
+    final spine = await _spineOf(workId);
+    final segmentIdx = spine.alignments.isEmpty
+        ? null
+        : spine.positionAtAudioTime(positionMs).segmentIdx;
+    return into(captures).insert(
+      CapturesCompanion.insert(
+        profileId: profileId,
+        workId: workId,
+        positionMs: positionMs,
+        createdAtMs: nowMs,
+        segmentIdx: Value(segmentIdx),
+        fileIdx: Value(fileIdx),
+      ),
+    );
+  }
+
+  /// Binds every still-unbound capture on [workId] — called alongside
+  /// [PlayerController.reloadAlignments] when a transcription job
+  /// completes. A no-op (not a throw) if the work still has no alignments.
+  /// Returns how many captures were bound.
+  Future<int> backfillForWork(int workId) async {
+    final spine = await _spineOf(workId);
+    if (spine.alignments.isEmpty) return 0;
+    final unbound = await (select(
+      captures,
+    )..where((c) => c.workId.equals(workId) & c.segmentIdx.isNull())).get();
+    for (final c in unbound) {
+      final segmentIdx = spine.positionAtAudioTime(c.positionMs).segmentIdx;
+      await (update(captures)..where((t) => t.id.equals(c.id))).write(
+        CapturesCompanion(segmentIdx: Value(segmentIdx)),
+      );
+    }
+    return unbound.length;
+  }
+
+  Future<List<CaptureRow>> capturesOf(int workId) =>
+      (select(captures)
+            ..where((c) => c.workId.equals(workId))
+            ..orderBy([(c) => OrderingTerm.asc(c.positionMs)]))
+          .get();
+
+  /// Every capture belonging to any work this profile owns — the study
+  /// crown's daily review queue reads across the whole profile, not one
+  /// episode at a time.
+  Future<List<CaptureRow>> capturesOfProfile(int profileId) async {
+    final rows = await (select(captures).join([
+      innerJoin(works, works.id.equalsExp(captures.workId)),
+    ])..where(works.profileId.equals(profileId))).get();
+    return [for (final r in rows) r.readTable(captures)];
+  }
+}
+
+/// The study crown, Phase 1: daily review's DAO. See [DailyReviewCards]'s
+/// doc comment for why this is keyed by (sourceType, sourceId) rather than
+/// two foreign keys.
+@DriftAccessor(tables: [DailyReviewCards, WordLedger, Captures, Works])
+class DailyReviewDao extends DatabaseAccessor<AppDatabase>
+    with _$DailyReviewDaoMixin {
+  DailyReviewDao(super.db);
+
+  String _itemId(String sourceType, int sourceId) => '$sourceType:$sourceId';
+
+  /// One source's stored card, or null if it has never been graded (a
+  /// brand-new, immediately due card: the same lazy-creation law [Cards]
+  /// rows follow).
+  Future<study.StudyCard?> cardOf({
+    required int profileId,
+    required String sourceType,
+    required int sourceId,
+  }) async {
+    final row =
+        await (select(dailyReviewCards)..where(
+              (c) =>
+                  c.profileId.equals(profileId) &
+                  c.sourceType.equals(sourceType) &
+                  c.sourceId.equals(sourceId),
+            ))
+            .getSingleOrNull();
+    return row == null
+        ? null
+        : decodeStudyCard(_itemId(sourceType, sourceId), row.stateJson);
+  }
+
+  /// Stores one grade under whichever scheduler made it, leaving the other
+  /// half as it was (see [mergeCardStateJson]), exactly as course cards do.
+  Future<void> recordGrade({
+    required int profileId,
+    required String sourceType,
+    required int sourceId,
+    study.CardState? classic,
+    study.FsrsCardState? fsrs,
+  }) {
+    assert((classic == null) != (fsrs == null), 'one grade, one scheduler');
+    return transaction(() async {
+      final existing =
+          await (select(dailyReviewCards)..where(
+                (c) =>
+                    c.profileId.equals(profileId) &
+                    c.sourceType.equals(sourceType) &
+                    c.sourceId.equals(sourceId),
+              ))
+              .getSingleOrNull();
+      final stateJson = mergeCardStateJson(
+        existing?.stateJson,
+        classic: classic,
+        fsrs: fsrs,
+      );
+      if (existing != null) {
+        await (update(dailyReviewCards)..where((c) => c.id.equals(existing.id)))
+            .write(DailyReviewCardsCompanion(stateJson: Value(stateJson)));
+      } else {
+        await into(dailyReviewCards).insert(
+          DailyReviewCardsCompanion.insert(
+            profileId: profileId,
+            sourceType: sourceType,
+            sourceId: sourceId,
+            stateJson: stateJson,
+          ),
+        );
+      }
+    });
+  }
+
+  /// itemId ("type:id") -> stored card, or null for a source never graded,
+  /// for every ledger word and capture this profile owns. Course items
+  /// never enter this map; it is never built from [Cards]. A malformed row
+  /// is skipped individually (the store's law, matching
+  /// [StudyDao.loadCards]' hardening) rather than failing the whole queue.
+  Future<Map<String, study.StudyCard?>> loadAll(int profileId) async {
+    final words = await (select(
+      wordLedger,
+    )..where((w) => w.profileId.equals(profileId))).get();
+    final captureRows = await _capturesOfProfile(profileId);
+    final existing = await (select(
+      dailyReviewCards,
+    )..where((c) => c.profileId.equals(profileId))).get();
+    final byKey = {
+      for (final r in existing) _itemId(r.sourceType, r.sourceId): r,
+    };
+
+    final out = <String, study.StudyCard?>{};
+    void addSource(String sourceType, int sourceId) {
+      final itemId = _itemId(sourceType, sourceId);
+      final row = byKey[itemId];
+      if (row == null) {
+        out[itemId] = null;
+        return;
+      }
+      final card = decodeStudyCard(itemId, row.stateJson);
+      if (card != null) out[itemId] = card;
+    }
+
+    for (final w in words) {
+      addSource('ledger', w.id);
+    }
+    for (final c in captureRows) {
+      addSource('capture', c.id);
+    }
+    return out;
+  }
+
+  /// How many extracts/vocab are due right now — the home surface's quiet
+  /// chip, separate from any course's due count.
+  Future<int> dueCount(int profileId, int todayEpochDay) async {
+    final all = await loadAll(profileId);
+    return all.values
+        .where((c) => c == null || c.progress.isDue(todayEpochDay))
+        .length;
+  }
+
+  // Reuses CapturesDao's own join rather than duplicating it; DailyReviewDao
+  // cannot call another DAO's instance methods directly (DatabaseAccessor
+  // exposes tables, not sibling DAOs), so this repeats the same join inline.
+  Future<List<CaptureRow>> _capturesOfProfile(int profileId) async {
+    final rows = await (select(captures).join([
+      innerJoin(works, works.id.equalsExp(captures.workId)),
+    ])..where(works.profileId.equals(profileId))).get();
+    return [for (final r in rows) r.readTable(captures)];
+  }
+}
+
+/// A deleted transcript or translation as raw rows by table name, the
+/// shape Recently deleted keeps on disk (1.5.9).
+typedef SnapshotRows = Map<String, List<Map<String, Object?>>>;
+
+/// What putting a deleted transcript or translation back did. Every
+/// refusal leaves the database as it was.
+enum RestoreResult {
+  restored,
+
+  /// A transcript was made since; two never mix.
+  transcriptExists,
+
+  /// That language was translated again since.
+  translationExists,
+
+  /// The item itself is no longer in the library.
+  workGone,
+
+  /// A translation's transcript is gone too; it comes back first.
+  sourceGone,
+
+  /// A translation's transcript was made again since, with other
+  /// sentences: the old translation would sit on the wrong ones.
+  sourceChanged,
+}
+
+/// Segments and characters in one work's text.
+typedef TextSize = ({int segments, int chars});
+
+/// Ids per IN list: well under SQLite's bound-variable limit, so a list of
+/// any length is a handful of queries rather than one that fails.
+const _inChunk = 500;
+
+Iterable<List<int>> _chunks(Iterable<int> ids) sync* {
+  final all = ids.toSet().toList();
+  for (var i = 0; i < all.length; i += _inChunk) {
+    yield all.sublist(i, i + _inChunk > all.length ? all.length : i + _inChunk);
+  }
+}
+
+/// A queue row plus the work it names, and the episode and show when it
+/// came from a feed: the queue's rows without a second query per row.
+typedef QueueEntry = ({
+  QueueRow row,
+  Work work,
+  Episode? episode,
+  String? feedTitle,
+});
+
+/// The queue (P4 mercy #3): a position-ordered, per-profile list of
+/// works waiting to play next. Positions stay contiguous from 0 — every
+/// mutating method renumbers rather than leaving gaps, so "the head" is
+/// always simply the row at position 0.
+@DriftAccessor(tables: [QueueTable, Works, Episodes, Feeds])
+class QueueDao extends DatabaseAccessor<AppDatabase> with _$QueueDaoMixin {
+  QueueDao(super.db);
+
+  /// The queue in play order — index 0 is the head.
+  Future<List<QueueRow>> queueOf(int profileId) =>
+      (select(queueTable)
+            ..where((q) => q.profileId.equals(profileId))
+            ..orderBy([(q) => OrderingTerm.asc(q.position)]))
+          .get();
+
+  Future<QueueRow?> headOf(int profileId) async {
+    final rows = await queueOf(profileId);
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  Future<List<QueueEntry>> queueEntriesOf(int profileId) async {
+    final q =
+        select(
+            queueTable,
+          ).join([
+            innerJoin(works, works.id.equalsExp(queueTable.workId)),
+            leftOuterJoin(episodes, episodes.workId.equalsExp(works.id)),
+            leftOuterJoin(feeds, feeds.id.equalsExp(episodes.feedId)),
+          ])
+          ..where(queueTable.profileId.equals(profileId))
+          ..orderBy([OrderingTerm.asc(queueTable.position)]);
+    final rows = await q.get();
+    return [
+      for (final r in rows)
+        (
+          row: r.readTable(queueTable),
+          work: r.readTable(works),
+          episode: r.readTableOrNull(episodes),
+          feedTitle: r.readTableOrNull(feeds)?.title,
+        ),
+    ];
+  }
+
+  /// Queues [workId] right after whatever's currently playing. Already
+  /// queued moves it to the head instead of duplicating.
+  ///
+  /// [playingWorkId]: the episode playing now. Since Play puts what plays
+  /// at the head (owner, 14 Nov 2026), a Play next while it plays goes
+  /// just after it, so the queue reads in the order it will be heard.
+  Future<void> playNext({
+    required int profileId,
+    required int workId,
+    required int nowMs,
+    int? playingWorkId,
+  }) => _insertAt(
+    profileId: profileId,
+    workId: workId,
+    nowMs: nowMs,
+    atHead: true,
+    playingWorkId: playingWorkId,
+  );
+
+  /// Appends [workId] to the tail. Already queued moves it to the tail
+  /// instead of duplicating.
+  Future<void> playLast({
+    required int profileId,
+    required int workId,
+    required int nowMs,
+  }) => _insertAt(
+    profileId: profileId,
+    workId: workId,
+    nowMs: nowMs,
+    atHead: false,
+  );
+
+  Future<void> _insertAt({
+    required int profileId,
+    required int workId,
+    required int nowMs,
+    required bool atHead,
+    int? playingWorkId,
+  }) => transaction(() async {
+    await (delete(queueTable)..where(
+          (q) => q.profileId.equals(profileId) & q.workId.equals(workId),
+        ))
+        .go();
+    final rest = await queueOf(profileId);
+    // Behind the episode playing at the head, when there is one.
+    final at = !atHead
+        ? rest.length
+        : (rest.isNotEmpty &&
+                playingWorkId != null &&
+                rest.first.workId == playingWorkId &&
+                playingWorkId != workId)
+            ? 1
+            : 0;
+    if (atHead) {
+      for (final r in rest.skip(at)) {
+        await (update(queueTable)..where((q) => q.id.equals(r.id))).write(
+          QueueTableCompanion(position: Value(r.position + 1)),
+        );
+      }
+    }
+    await into(queueTable).insert(
+      QueueTableCompanion.insert(
+        profileId: profileId,
+        workId: workId,
+        position: at,
+        addedAtMs: nowMs,
+      ),
+    );
+  });
+
+  /// [playNext] for a run of works, kept in the given order ("Play from
+  /// here"). One transaction and one renumber, however long the run.
+  Future<void> playNextAll({
+    required int profileId,
+    required List<int> workIds,
+    required int nowMs,
+  }) => transaction(() async {
+    final run = workIds.toSet();
+    final rest = [
+      for (final r in await queueOf(profileId))
+        if (!run.contains(r.workId)) r.workId,
+    ];
+    await _rewrite(profileId, [...run, ...rest], nowMs);
+  });
+
+  /// Appends the works not already queued, in order ("Add unplayed to Up
+  /// Next"); queued ones keep their place. Returns how many were added.
+  Future<int> playLastAll({
+    required int profileId,
+    required List<int> workIds,
+    required int nowMs,
+  }) => transaction(() async {
+    final current = [for (final r in await queueOf(profileId)) r.workId];
+    final have = current.toSet();
+    final fresh = [
+      for (final id in workIds)
+        if (have.add(id)) id,
+    ];
+    var position = current.length;
+    for (final id in fresh) {
+      await into(queueTable).insert(QueueTableCompanion.insert(
+          profileId: profileId,
+          workId: id,
+          position: position++,
+          addedAtMs: nowMs));
+    }
+    return fresh.length;
+  });
+
+  /// Replaces the queue with [order], keeping each surviving row's
+  /// addedAtMs.
+  Future<void> _rewrite(int profileId, List<int> order, int nowMs) async {
+    final added = {
+      for (final r in await queueOf(profileId)) r.workId: r.addedAtMs,
+    };
+    await (delete(queueTable)..where((q) => q.profileId.equals(profileId)))
+        .go();
+    var position = 0;
+    for (final id in order) {
+      await into(queueTable).insert(QueueTableCompanion.insert(
+          profileId: profileId,
+          workId: id,
+          position: position++,
+          addedAtMs: added[id] ?? nowMs));
+    }
+  }
+
+  /// Drops [workId] from the queue (a no-op if it isn't there) and
+  /// renumbers what remains contiguously.
+  Future<void> remove({required int profileId, required int workId}) =>
+      transaction(() async {
+        await (delete(queueTable)..where(
+              (q) => q.profileId.equals(profileId) & q.workId.equals(workId),
+            ))
+            .go();
+        await _renumber(profileId);
+      });
+
+  /// Drag-reorder in the queue view: moves [workId] to [newPosition]
+  /// (0-indexed, clamped to the queue's bounds) and renumbers everyone
+  /// between the old and new spot.
+  Future<void> reorder({
+    required int profileId,
+    required int workId,
+    required int newPosition,
+  }) => transaction(() async {
+    final rows = await queueOf(profileId);
+    final without = [
+      for (final r in rows)
+        if (r.workId != workId) r,
+    ];
+    final moved = rows.firstWhere((r) => r.workId == workId);
+    final clamped = newPosition.clamp(0, without.length);
+    without.insert(clamped, moved);
+    for (var i = 0; i < without.length; i++) {
+      if (without[i].position == i) continue;
+      await (update(queueTable)..where((q) => q.id.equals(without[i].id)))
+          .write(QueueTableCompanion(position: Value(i)));
+    }
+  });
+
+  Future<void> _renumber(int profileId) async {
+    final rows = await queueOf(profileId);
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].position == i) continue;
+      await (update(queueTable)..where((q) => q.id.equals(rows[i].id))).write(
+        QueueTableCompanion(position: Value(i)),
+      );
+    }
+  }
+}
+
+/// One library work as the query model sees it: the episode row when it
+/// has one (only `kind == 'episode'` works do) and the feed title —
+/// nullable because most library kinds (book/article/note) have neither.
+typedef LibraryQueryEntry = ({Work work, Episode? episode, String? feedTitle});
+
+/// The library screen's join query plus saved-view CRUD (Campaign 5 Phase
+/// 2). A separate accessor from [FeedsDao] and [SpineDao] rather than
+/// bolted onto either — it reads across all three of their tables
+/// (Works, Episodes, Feeds) plus owns [SavedViews] outright.
+@DriftAccessor(tables: [SavedViews, Works, Episodes, Feeds])
+class LibraryDao extends DatabaseAccessor<AppDatabase> with _$LibraryDaoMixin {
+  LibraryDao(super.db);
+
+  /// Every work in a profile's library, left-joined onto its episode row
+  /// and feed title — the fields [LibraryQuery] evaluation needs
+  /// (feed/source, read state) that [SpineDao.worksOf] alone doesn't
+  /// carry. A left join, not inner: most library kinds have no episode
+  /// row at all, and must still appear.
+  ///
+  /// Campaign 9 Phase 4 ("the feed becomes honest reading"): an ephemeron
+  /// work never appears here — that's what the river is for, and every
+  /// feed item arrives as one (ADR-0002) whether or not it's ever kept.
+  /// [SpineDao.promoteWork] (the river's Keep gesture) flips persistence
+  /// to 'work', at which point the SAME query starts returning it — no
+  /// separate refresh path exists or is needed.
+  Future<List<LibraryQueryEntry>> libraryQueryEntriesOf(int profileId) async {
+    final q = select(works).join([
+      leftOuterJoin(episodes, episodes.workId.equalsExp(works.id)),
+      leftOuterJoin(feeds, feeds.id.equalsExp(episodes.feedId)),
+    ])
+      // A version lives with its episode (1.6.18): never a row of its own.
+      ..where(works.profileId.equals(profileId) &
+          works.persistence.isNotValue('ephemeron') &
+          works.kind.isNotValue('version'));
+    final rows = await q.get();
+    return [
+      for (final r in rows)
+        (
+          work: r.readTable(works),
+          episode: r.readTableOrNull(episodes),
+          feedTitle: r.readTableOrNull(feeds)?.title,
+        )
+    ];
+  }
+
+  /// A profile's saved views in chip order (position ascending).
+  Future<List<SavedViewRow>> savedViewsOf(int profileId) =>
+      (select(savedViews)
+            ..where((v) => v.profileId.equals(profileId))
+            ..orderBy([(v) => OrderingTerm.asc(v.position)]))
+          .get();
+
+  /// Appends a new saved view at the tail — the chips row grows to the
+  /// right, matching how the queue appends (P4 mercy #3).
+  Future<int> createSavedView(
+      {required int profileId,
+      required String name,
+      required String queryJson,
+      required int nowMs}) async {
+    final existing = await savedViewsOf(profileId);
+    return into(savedViews).insert(SavedViewsCompanion.insert(
+        profileId: profileId,
+        name: name,
+        queryJson: queryJson,
+        position: existing.length,
+        createdAtMs: nowMs));
+  }
+
+  /// Deletes one saved view and renumbers what remains contiguously —
+  /// [QueueDao.remove]'s renumber-after-delete shape.
+  Future<void> deleteSavedView(int id) => transaction(() async {
+        final row =
+            await (select(savedViews)..where((v) => v.id.equals(id)))
+                .getSingleOrNull();
+        await (delete(savedViews)..where((v) => v.id.equals(id))).go();
+        if (row != null) await _renumberSavedViews(row.profileId);
+      });
+
+  /// Drag-reorder: moves [viewId] to [newPosition] (0-indexed, clamped)
+  /// and renumbers everyone between the old and new spot —
+  /// [QueueDao.reorder]'s shape, over saved views instead of the queue.
+  Future<void> reorderSavedView(
+      {required int profileId,
+      required int viewId,
+      required int newPosition}) =>
+      transaction(() async {
+        final rows = await savedViewsOf(profileId);
+        final without = [for (final r in rows) if (r.id != viewId) r];
+        final moved = rows.firstWhere((r) => r.id == viewId);
+        final clamped = newPosition.clamp(0, without.length);
+        without.insert(clamped, moved);
+        for (var i = 0; i < without.length; i++) {
+          if (without[i].position == i) continue;
+          await (update(savedViews)
+                ..where((v) => v.id.equals(without[i].id)))
+              .write(SavedViewsCompanion(position: Value(i)));
+        }
+      });
+
+  Future<void> _renumberSavedViews(int profileId) async {
+    final rows = await savedViewsOf(profileId);
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].position == i) continue;
+      await (update(savedViews)..where((v) => v.id.equals(rows[i].id)))
+          .write(SavedViewsCompanion(position: Value(i)));
+    }
+  }
+}
+
+/// Campaign 7 ("audiobooks are a door", ADR-0013): the audiobook work
+/// type's own settings row and its ordered file list.
+@DriftAccessor(tables: [Audiobooks, AudiobookFiles, Works])
+class AudiobooksDao extends DatabaseAccessor<AppDatabase>
+    with _$AudiobooksDaoMixin {
+  AudiobooksDao(super.db);
+
+  /// Creates the settings row import always writes — unlike [Feeds]'s
+  /// playback columns (which start out absent until a feed's own
+  /// settings screen first saves them), an audiobook's row exists from
+  /// the moment the work does, since import is this table's only writer
+  /// of the row itself.
+  Future<void> insertAudiobook(int workId) => into(
+    audiobooks,
+  ).insert(AudiobooksCompanion.insert(workId: Value(workId)));
+
+  Future<AudiobookRow?> audiobookOf(int workId) =>
+      (select(audiobooks)..where((a) => a.workId.equals(workId)))
+          .getSingleOrNull();
+
+  /// Null clears the override back to deferring to the player's global
+  /// speed — same law as [FeedsDao.updatePlaybackSettings].
+  Future<void> setSpeedOverride(int workId, double? speed) =>
+      (update(audiobooks)..where((a) => a.workId.equals(workId))).write(
+        AudiobooksCompanion(speedOverride: Value(speed)),
+      );
+
+  /// Inserts [paths] as this audiobook's file list, already in PLAYBACK
+  /// order — ordering is the caller's job (the pure
+  /// `orderAudiobookFiles` in intake_core), this just persists it as
+  /// fileIdx = list index.
+  Future<void> insertFiles(int workId, List<String> paths) => batch(
+    (b) => b.insertAll(audiobookFiles, [
+      for (var i = 0; i < paths.length; i++)
+        AudiobookFilesCompanion.insert(
+          workId: workId,
+          fileIdx: i,
+          path: paths[i],
+        ),
+    ]),
+  );
+
+  Future<List<AudiobookFileRow>> filesOf(int workId) =>
+      (select(audiobookFiles)
+            ..where((f) => f.workId.equals(workId))
+            ..orderBy([(f) => OrderingTerm.asc(f.fileIdx)]))
+          .get();
+
+  /// The library tile's progress denominator (ADR-0013) — how many files
+  /// this audiobook has, without loading every row just to count them.
+  Future<int> fileCountOf(int workId) async {
+    final c = countAll();
+    final q = selectOnly(audiobookFiles)
+      ..addColumns([c])
+      ..where(audiobookFiles.workId.equals(workId));
+    return (await q.getSingle()).read(c) ?? 0;
+  }
+
+  /// [fileCountOf] for a whole list at once.
+  Future<Map<int, int>> fileCountsOf(Iterable<int> workIds) async {
+    final c = audiobookFiles.id.count();
+    final out = <int, int>{};
+    for (final chunk in _chunks(workIds)) {
+      final q = selectOnly(audiobookFiles)
+        ..addColumns([audiobookFiles.workId, c])
+        ..where(audiobookFiles.workId.isIn(chunk))
+        ..groupBy([audiobookFiles.workId]);
+      for (final r in await q.get()) {
+        out[r.read(audiobookFiles.workId)!] = r.read(c) ?? 0;
+      }
+    }
+    return out;
+  }
+
+  /// Learned lazily the first time a file actually plays
+  /// ([PlayerController]'s duration-stream handler) — see
+  /// [AudiobookFiles.durationMs]'s own doc comment for why nothing
+  /// probes this at import.
+  Future<void> setFileDuration(int workId, int fileIdx, int durationMs) =>
+      (update(audiobookFiles)..where(
+            (f) => f.workId.equals(workId) & f.fileIdx.equals(fileIdx),
+          ))
+          .write(AudiobookFilesCompanion(durationMs: Value(durationMs)));
+}
+
+/// A river row: the spine work plus its river metadata and feed title.
+typedef RiverEntry = ({Work work, Episode episode, String feedTitle});
+
+/// Where a page of Latest ends: the last row's sort key.
+typedef RiverCursor = ({int publishedAtMs, int workId});
+
+/// Latest's chips. They filter; nothing here sorts (ADR-0003 law 1).
+enum RiverKind { all, text, audio }
+
+/// Rows per page of Latest: a few screens' worth on a tall phone, so one
+/// fling rarely reaches the end before the next page lands.
+const riverPageSize = 60;
+
+/// The local Shared source's address (1.5.5): not a web address, so no
+/// fetch, guard or follow by URL can ever reach or match it.
+const sharedFeedUrl = 'trellis:shared';
+
+/// Whether [feed] is the local Shared source rather than a followed show.
+bool isSharedFeed(Feed feed) => feed.url == sharedFeedUrl;
+
+@DriftAccessor(
+    tables: [Feeds, Episodes, Works, PlayerPositions, Positions, Alignments,
+        WorkNotes])
+class FeedsDao extends DatabaseAccessor<AppDatabase> with _$FeedsDaoMixin {
+  FeedsDao(super.db);
+
+  Future<int> insertFeed({
+    required int profileId,
+    required String url,
+    String title = '',
+    bool autoDownload = false,
+  }) => into(feeds).insert(
+    FeedsCompanion.insert(
+      profileId: profileId,
+      url: url,
+      title: Value(title),
+      autoDownload: Value(autoDownload),
+    ),
+  );
+
+  Future<List<Feed>> feedsOf(int profileId) =>
+      (select(feeds)
+            ..where((f) => f.profileId.equals(profileId))
+            ..orderBy([(f) => OrderingTerm.asc(f.id)]))
+          .get();
+
+  /// [feedsOf] minus the local Shared source: the shows this reader
+  /// follows, for every list, refresh and export of them.
+  Future<List<Feed>> subscriptionsOf(int profileId) =>
+      (select(feeds)
+            ..where((f) =>
+                f.profileId.equals(profileId) &
+                f.url.equals(sharedFeedUrl).not())
+            ..orderBy([(f) => OrderingTerm.asc(f.id)]))
+          .get();
+
+  /// The profile's Shared source (1.5.5), made on the first share. A blog
+  /// by origin: what is shared is mostly text.
+  Future<int> sharedFeedId(int profileId) => transaction(() async {
+        final existing = await feedByUrl(profileId, sharedFeedUrl);
+        if (existing != null) return existing.id;
+        final id = await insertFeed(
+            profileId: profileId, url: sharedFeedUrl, title: 'Shared');
+        await setOrigin(id, 'blog');
+        return id;
+      });
+
+  /// The work a share of [url] already made, or any work kept from that
+  /// address: sharing it again opens that one rather than add a twin.
+  Future<int?> workBySharedUrl(int profileId, String url) async {
+    final byWork = await (selectOnly(works)
+          ..addColumns([works.id])
+          ..where(works.profileId.equals(profileId) &
+              works.sourceUrl.equals(url))
+          ..orderBy([OrderingTerm.asc(works.id)])
+          ..limit(1))
+        .map((r) => r.read(works.id))
+        .getSingleOrNull();
+    if (byWork != null) return byWork;
+    final shared = await feedByUrl(profileId, sharedFeedUrl);
+    if (shared == null) return null;
+    return (selectOnly(episodes)
+          ..addColumns([episodes.workId])
+          ..where(episodes.feedId.equals(shared.id) & episodes.guid.equals(url))
+          ..limit(1))
+        .map((r) => r.read(episodes.workId))
+        .getSingleOrNull();
+  }
+
+  /// The address a shared link row still waits on: set while the row is
+  /// the bare link a share saved first (its page not read yet, or not
+  /// readable when it was tried), null once the page has filled it.
+  Future<String?> sharedLinkOnlyUrl(int workId) async {
+    final row = await (select(episodes).join([
+      innerJoin(works, works.id.equalsExp(episodes.workId)),
+      innerJoin(feeds, feeds.id.equalsExp(episodes.feedId)),
+    ])
+          ..where(episodes.workId.equals(workId) &
+              feeds.url.equals(sharedFeedUrl) &
+              works.kind.equals('note') &
+              works.sourceUrl.equalsExp(episodes.guid)))
+        .getSingleOrNull();
+    return row?.readTable(works).sourceUrl;
+  }
+
+  /// The work a share of the same text (by [hash]) made at or after
+  /// [sinceMs], if any: a double tap on Share is one share.
+  Future<int?> sharedTextSince(int profileId, String hash, int sinceMs) async {
+    final shared = await feedByUrl(profileId, sharedFeedUrl);
+    if (shared == null) return null;
+    return (selectOnly(episodes)
+          ..addColumns([episodes.workId])
+          ..where(episodes.feedId.equals(shared.id) &
+              episodes.guid.like('text:$hash:%') &
+              episodes.publishedAtMs.isBiggerOrEqualValue(sinceMs))
+          ..orderBy([OrderingTerm.desc(episodes.publishedAtMs)])
+          ..limit(1))
+        .map((r) => r.read(episodes.workId))
+        .getSingleOrNull();
+  }
+
+  Future<Feed?> feedByUrl(int profileId, String url) =>
+      (select(feeds)
+            ..where((f) => f.profileId.equals(profileId) & f.url.equals(url)))
+          .getSingleOrNull();
+
+  /// [feedByUrl], also matching a show that moved away from [url]: the
+  /// address a list or a paste names may be the one it was followed at.
+  /// The row at [url] itself wins over one that merely came from there.
+  Future<Feed?> feedByAnyUrl(int profileId, String url) => (select(feeds)
+        ..where((f) =>
+            f.profileId.equals(profileId) &
+            (f.url.equals(url) | f.subscribedUrl.equals(url)))
+        ..orderBy([(f) => OrderingTerm.desc(f.url.equals(url))])
+        ..limit(1))
+      .getSingleOrNull();
+
+  Future<Feed?> feedById(int id) =>
+      (select(feeds)..where((f) => f.id.equals(id))).getSingleOrNull();
+
+  /// The declared language of the feed [workId]'s episode belongs to; null
+  /// when it declares none or the work is no feed episode.
+  /// Every show's declared language for [profileId], by feed id — one
+  /// query for a whole list of rows, which [languageOfWorkFeed] would ask
+  /// once per row.
+  Future<Map<int, String>> feedLanguagesOf(int profileId) async {
+    final rows = await (select(feeds)
+          ..where((f) => f.profileId.equals(profileId) & f.language.isNotNull()))
+        .get();
+    return {for (final f in rows) f.id: f.language!};
+  }
+
+  Future<String?> languageOfWorkFeed(int workId) async {
+    final row = await (select(feeds).join([
+      innerJoin(episodes, episodes.feedId.equalsExp(feeds.id)),
+    ])..where(episodes.workId.equals(workId))).getSingleOrNull();
+    return row?.readTable(feeds).language;
+  }
+
+  /// Per-podcast playback settings (P4 mercy #2) plus the storage setting
+  /// (P4 "archive, never forget"). Every argument's null means "clear this
+  /// back to deferring to the app / keeping everything" — none of them are
+  /// left-alone-if-absent like [updateRefreshState]'s validators, since the
+  /// settings screen always writes its full, current form state.
+  Future<void> updatePlaybackSettings(
+    int feedId, {
+    double? speedOverride,
+    int? skipIntroSeconds,
+    int? skipOutroSeconds,
+    int? keepLatestAudio,
+    bool? dspEnabled,
+  }) => (update(feeds)..where((f) => f.id.equals(feedId))).write(
+    FeedsCompanion(
+      speedOverride: Value(speedOverride),
+      skipIntroSeconds: Value(skipIntroSeconds),
+      skipOutroSeconds: Value(skipOutroSeconds),
+      keepLatestAudio: Value(keepLatestAudio),
+      dspEnabled: Value(dspEnabled),
+    ),
+  );
+
+  /// Persists the outcome of a refresh: adopted title, validators, and the
+  /// breaker's serialized state. Null validators clear the column — the
+  /// caller passes the state's current values, which already implement the
+  /// donor's keep-old-when-absent law.
+  ///
+  /// [nextPageUrl] only touches the column when [updateNextPageUrl] is true
+  /// (the fresh-parse path, where a null value means the host's archive
+  /// link is genuinely gone now). A non-fresh refresh (304/throttled/error)
+  /// has no new body to learn that from, so it omits both and the column
+  /// keeps whatever it already held. [imageUrl]/[updateImageUrl] (Campaign 9
+  /// Phase 5) follow the identical shape for the channel artwork URL, and
+  /// [language]/[updateLanguage] for the declared channel language.
+  Future<void> updateRefreshState(
+    int feedId, {
+    required String title,
+    required String? etag,
+    required String? lastModified,
+    required String breakerJson,
+    String? nextPageUrl,
+    bool updateNextPageUrl = false,
+    String? imageUrl,
+    bool updateImageUrl = false,
+    String? language,
+    bool updateLanguage = false,
+  }) async {
+    await (update(feeds)..where((f) => f.id.equals(feedId))).write(
+      FeedsCompanion(
+        etag: Value(etag),
+        lastModified: Value(lastModified),
+        breakerJson: Value(breakerJson),
+        nextPageUrl: updateNextPageUrl
+            ? Value(nextPageUrl)
+            : const Value.absent(),
+        imageUrl: updateImageUrl ? Value(imageUrl) : const Value.absent(),
+        language: updateLanguage ? Value(language) : const Value.absent(),
+      ),
+    );
+    // Only a changed title is written: the show trigger is guarded too,
+    // but a title left out of the SET list never asks it.
+    await (update(feeds)
+          ..where((f) => f.id.equals(feedId) & f.title.equals(title).not()))
+        .write(FeedsCompanion(title: Value(title)));
+  }
+
+  Future<void> setAutoDownload(int feedId, bool on) =>
+      (update(feeds)..where((f) => f.id.equals(feedId))).write(
+        FeedsCompanion(autoDownload: Value(on)),
+      );
+
+  /// Turns auto-download off on every show and forgets the per-show marks
+  /// (`auto_download_after:<feed>` device settings), as a restore must.
+  Future<void> clearAutoDownloadConsent() async {
+    await update(feeds).write(const FeedsCompanion(autoDownload: Value(false)));
+    await customStatement(
+        "DELETE FROM device_settings WHERE key LIKE 'auto_download_after:%' "
+        "OR key = 'make_ahead'");
+  }
+
+  /// Every reader's opted-in shows: auto-download belongs to the device,
+  /// which fetches for whoever follows them.
+  Future<List<Feed>> autoDownloadFeeds() =>
+      (select(feeds)
+            ..where((f) => f.autoDownload.equals(true))
+            ..orderBy([(f) => OrderingTerm.asc(f.id)]))
+          .get();
+
+  Future<void> insertEpisode({
+    required int workId,
+    required int feedId,
+    required String guid,
+    String? enclosureUrl,
+    int? durationMs,
+    String? imageUrl,
+    required int publishedAtMs,
+    String? sourceLabel,
+    String? voiceKind,
+    String? clearness,
+  }) => into(episodes).insert(
+    EpisodesCompanion.insert(
+      workId: Value(workId),
+      feedId: feedId,
+      guid: guid,
+      enclosureUrl: Value(enclosureUrl),
+      durationMs: Value(durationMs),
+      imageUrl: Value(imageUrl),
+      publishedAtMs: publishedAtMs,
+      sourceLabel: Value(sourceLabel),
+      voiceKind: Value(voiceKind),
+      clearness: Value(clearness),
+    ),
+  );
+
+  /// [insertEpisode] that yields to a row already holding this
+  /// (feed, guid): false when one did, and nothing was written.
+  Future<bool> insertEpisodeIfNew({
+    required int workId,
+    required int feedId,
+    required String guid,
+    String? enclosureUrl,
+    int? durationMs,
+    String? imageUrl,
+    required int publishedAtMs,
+  }) =>
+      // One transaction, so changes() is read on the connection that
+      // inserted: outside one, a read pool would answer it from a reader.
+      transaction(() async {
+        await into(episodes).insert(
+            EpisodesCompanion.insert(
+              workId: Value(workId),
+              feedId: feedId,
+              guid: guid,
+              enclosureUrl: Value(enclosureUrl),
+              durationMs: Value(durationMs),
+              imageUrl: Value(imageUrl),
+              publishedAtMs: publishedAtMs,
+            ),
+            mode: InsertMode.insertOrIgnore);
+        final n = await customSelect('SELECT changes() AS n').getSingle();
+        return n.read<int>('n') > 0;
+      });
+
+  /// Whether any episode row of this feed is left.
+  Future<bool> hasEpisodes(int feedId) async {
+    final q = selectOnly(episodes)
+      ..addColumns([episodes.workId])
+      ..where(episodes.feedId.equals(feedId))
+      ..limit(1);
+    return (await q.get()).isNotEmpty;
+  }
+
+  Future<Episode?> episodeOf(int workId) => (select(
+    episodes,
+  )..where((e) => e.workId.equals(workId))).getSingleOrNull();
+
+  /// P4 "archive, never forget": marks (or clears, given null) when this
+  /// episode's downloaded audio FILE was evicted. Never touches the row
+  /// itself — the row's continued existence IS the promise.
+  Future<void> setArchived(int workId, int? archivedAtMs) =>
+      (update(episodes)..where((e) => e.workId.equals(workId))).write(
+        EpisodesCompanion(archivedAtMs: Value(archivedAtMs)),
+      );
+
+  /// The offline DSP preprocess's (Campaign 6, ADR-0012) atomic-promote
+  /// write: both durations land together, in the SAME call the pipeline
+  /// makes right after the processed file replaces the playable one —
+  /// never one without the other, so a partially-set pair can never exist
+  /// for the time-saved counter to misread.
+  Future<void> setDspResult(
+    int workId, {
+    required int originalDurationMs,
+    required int processedDurationMs,
+  }) => (update(episodes)..where((e) => e.workId.equals(workId))).write(
+    EpisodesCompanion(
+      dspOriginalDurationMs: Value(originalDurationMs),
+      dspProcessedDurationMs: Value(processedDurationMs),
+    ),
+  );
+
+  /// This feed's rules (Campaign 5 Phase 3) — see [Feeds.rulesJson].
+  Future<void> setRules(int feedId, String rulesJson) =>
+      (update(feeds)..where((f) => f.id.equals(feedId))).write(
+          FeedsCompanion(
+              rulesJson: Value(rulesJson), bodyHash: const Value(null)));
+
+  /// A full parse has run since 1.5.4 began keeping show notes.
+  Future<void> clearNotesFillPending(int feedId) =>
+      (update(feeds)..where((f) => f.id.equals(feedId)))
+          .write(const FeedsCompanion(notesFillPending: Value(null)));
+
+  /// Recorded only once a body's items have landed, so a failed ingest
+  /// is retried by the next refresh rather than skipped as unchanged.
+  Future<void> setBodyHash(int feedId, String hash) =>
+      (update(feeds)..where((f) => f.id.equals(feedId)))
+          .write(FeedsCompanion(bodyHash: Value(hash)));
+
+  /// Cross-feed dedup candidates: every currently-visible (not already
+  /// suppressed) episode in a profile's river, with what
+  /// `feed_dedup.dart`'s pure [findDuplicates] needs to compare them —
+  /// nothing else. Excluding already-suppressed rows keeps a
+  /// [duplicateOfWorkId] always pointing at a non-suppressed root rather
+  /// than chaining through another suppressed row.
+  ///
+  /// Only those five columns are read: a profile's whole river is tens of
+  /// thousands of rows, and mapping every column of both tables for each
+  /// was most of the pass.
+  Future<List<({int workId, int feedId, String? sourceUrl, String title,
+      int publishedAtMs})>> dedupCandidatesOf(int profileId) async {
+    final q = selectOnly(episodes).join([
+      innerJoin(works, works.id.equalsExp(episodes.workId)),
+      innerJoin(feeds, feeds.id.equalsExp(episodes.feedId)),
+    ])
+      ..addColumns([
+        works.id,
+        episodes.feedId,
+        works.sourceUrl,
+        works.title,
+        episodes.publishedAtMs,
+      ])
+      // A shared item was handed in on purpose: it is never hidden behind
+      // a followed show's copy, nor hides one.
+      ..where(works.profileId.equals(profileId) &
+          episodes.dedupReason.isNull() &
+          feeds.url.equals(sharedFeedUrl).not());
+    final rows = await q.get();
+    return [
+      for (final r in rows)
+        (
+          workId: r.read(works.id)!,
+          feedId: r.read(episodes.feedId)!,
+          sourceUrl: r.read(works.sourceUrl),
+          title: r.read(works.title)!,
+          publishedAtMs: r.read(episodes.publishedAtMs)!,
+        )
+    ];
+  }
+
+  /// The newest [limit] distinct episode images of a feed, newest first,
+  /// leaving out [except] (the show's own): what a refresh fetches up
+  /// front, without loading every episode row to pick them.
+  Future<List<String>> episodeArtworkOf(int feedId,
+      {String? except, required int limit}) async {
+    final rows = await customSelect('''
+      SELECT image_url FROM episodes
+      WHERE feed_id = ? AND image_url IS NOT NULL
+        AND (? IS NULL OR image_url != ?)
+      GROUP BY image_url
+      ORDER BY MAX(published_at_ms) DESC
+      LIMIT ?
+    ''', variables: [
+      Variable.withInt(feedId),
+      Variable(except),
+      Variable(except),
+      Variable.withInt(limit),
+    ], readsFrom: {episodes}).get();
+    return [for (final r in rows) r.read<String>('image_url')];
+  }
+
+  /// Suppresses one episode as a cross-feed duplicate — hidden from
+  /// [riverItems], the row untouched.
+  Future<void> setDedup(int workId,
+          {required String reason, required int canonicalWorkId}) =>
+      (update(episodes)..where((e) => e.workId.equals(workId))).write(
+          EpisodesCompanion(
+              dedupReason: Value(reason),
+              duplicateOfWorkId: Value(canonicalWorkId)));
+
+  /// Un-suppresses one episode — [deleteWork] calls this on anything
+  /// pointing at a work it is about to remove, so a suppression can never
+  /// quietly outlive the canonical row it names.
+  Future<void> clearDedup(int workId) =>
+      (update(episodes)..where((e) => e.workId.equals(workId))).write(
+          const EpisodesCompanion(
+              dedupReason: Value(null), duplicateOfWorkId: Value(null)));
+
+  /// Seen items whose stored row still lacks a length or artwork, keyed
+  /// by guid, so ingest only asks to fill rows that have a gap. Rows with
+  /// both are absent.
+  Future<Map<String, ({bool duration, bool image})>> metadataGapsOf(
+      int feedId) async {
+    final q = selectOnly(episodes)
+      ..addColumns([episodes.guid, episodes.durationMs, episodes.imageUrl])
+      ..where(episodes.feedId.equals(feedId) &
+          (episodes.durationMs.isNull() | episodes.imageUrl.isNull()));
+    return {
+      for (final r in await q.get())
+        r.read(episodes.guid)!: (
+          duration: r.read(episodes.durationMs) == null,
+          image: r.read(episodes.imageUrl) == null,
+        ),
+    };
+  }
+
+  /// The guids of this feed's audio items that have no notes stored yet:
+  /// what a refresh may fill. Text items keep their body as segments.
+  Future<Set<String>> notesGapsOf(int feedId) async =>
+      (await notesGapIdsOf(feedId)).keys.toSet();
+
+  /// [notesGapsOf] with each item's work id, so a fill needs no lookup.
+  Future<Map<String, int>> notesGapIdsOf(int feedId) async {
+    final rows = await customSelect('''
+      SELECT e.guid AS guid, e.work_id AS work_id FROM episodes e
+      WHERE e.feed_id = ? AND e.enclosure_url IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM work_notes n WHERE n.work_id = e.work_id)
+    ''', variables: [Variable.withInt(feedId)],
+        readsFrom: {episodes, workNotes}).get();
+    return {
+      for (final r in rows) r.read<String>('guid'): r.read<int>('work_id'),
+    };
+  }
+
+  /// Stores [workId]'s notes unless it already has some: a refresh only
+  /// fills what is missing, and never rewrites what was kept.
+  Future<void> fillNotes(int workId,
+          {required String html, required String plain}) =>
+      into(workNotes).insert(
+          WorkNotesCompanion.insert(
+              workId: Value(workId), html: html, plain: plain),
+          mode: InsertMode.insertOrIgnore);
+
+  /// Null when there are none, or when the feed's were nothing readable
+  /// (stored empty, so a refresh doesn't clean them again).
+  Future<WorkNote?> notesOf(int workId) async {
+    final n = await (select(workNotes)..where((n) => n.workId.equals(workId)))
+        .getSingleOrNull();
+    return n == null || n.html.isEmpty ? null : n;
+  }
+
+  /// This feed's stored guids, each with its episode's enclosure URL.
+  Future<Map<String, String?>> guidEnclosuresOf(int feedId) async {
+    final q = selectOnly(episodes)
+      ..addColumns([episodes.guid, episodes.enclosureUrl])
+      ..where(episodes.feedId.equals(feedId));
+    return {
+      for (final r in await q.get())
+        r.read(episodes.guid)!: r.read(episodes.enclosureUrl),
+    };
+  }
+
+  Future<Set<String>> guidsOf(int feedId) async {
+    final q = selectOnly(episodes)
+      ..addColumns([episodes.guid])
+      ..where(episodes.feedId.equals(feedId));
+    final rows = await q.get();
+    return {for (final r in rows) r.read(episodes.guid)!};
+  }
+
+  /// What a Latest row names as its source: who shared it, else its show.
+  String _sourceTitle(TypedResult r) =>
+      r.readTable(episodes).sourceLabel ?? r.readTable(feeds).title;
+
+  /// THE river query (ADR-0003 law 1): reverse-chronological by publish
+  /// time, nothing else. The only other order is [episodesOfFeed]'s, one
+  /// show by date in the direction the listener picked; nothing ranks.
+  /// Publish time is the feed's own date; ingest stamps first-seen only
+  /// when an item carries none, so an OPML import's one first-seen day
+  /// never decides the order.
+  ///
+  /// Latest is a permanent archive (ADR-0019), so the query is paged by
+  /// keyset: [after] continues below a loaded row, [through] re-reads
+  /// every row down to and including one (a reload of what is on screen),
+  /// and [limit] caps a page. [kind] is the text/audio chip: a filter, so
+  /// a filtered page is still a full page.
+  Future<List<RiverEntry>> riverItems(
+    int profileId, {
+    RiverCursor? after,
+    RiverCursor? through,
+    int? limit = riverPageSize,
+    RiverKind kind = RiverKind.all,
+  }) async {
+    final q = select(episodes).join([
+      innerJoin(works, works.id.equalsExp(episodes.workId)),
+      innerJoin(feeds, feeds.id.equalsExp(episodes.feedId)),
+    ])
+      // The unary plus keeps SQLite off the works index: driven from
+      // there it must sort every one of the profile's items to find a
+      // page, where walking idx_episodes_published stops after one.
+      ..where(const CustomExpression<int>('+works.profile_id')
+              .equals(profileId) &
+          episodes.dedupReason.isNull())
+      // The id settles a tie, so two items published in the same second
+      // keep one order across reloads and pages.
+      ..orderBy([
+        OrderingTerm.desc(episodes.publishedAtMs),
+        OrderingTerm.desc(episodes.workId),
+      ]);
+    switch (kind) {
+      case RiverKind.all:
+        break;
+      case RiverKind.text:
+        q.where(episodes.enclosureUrl.isNull());
+      case RiverKind.audio:
+        q.where(episodes.enclosureUrl.isNotNull());
+    }
+    if (after != null) {
+      q.where(episodes.publishedAtMs.isSmallerThanValue(after.publishedAtMs) |
+          (episodes.publishedAtMs.equals(after.publishedAtMs) &
+              episodes.workId.isSmallerThanValue(after.workId)));
+    }
+    if (through != null) {
+      q.where(episodes.publishedAtMs.isBiggerThanValue(through.publishedAtMs) |
+          (episodes.publishedAtMs.equals(through.publishedAtMs) &
+              episodes.workId.isBiggerOrEqualValue(through.workId)));
+    }
+    if (limit != null) q.limit(limit);
+    final rows = await q.get();
+    return [
+      for (final r in rows)
+        (
+          work: r.readTable(works),
+          episode: r.readTable(episodes),
+          feedTitle: _sourceTitle(r),
+        ),
+    ];
+  }
+
+  /// One row of Latest as [riverItems] would return it, or null once it
+  /// no longer belongs there: what a row action re-reads instead of the
+  /// whole list.
+  Future<RiverEntry?> riverEntryOf(int workId) async {
+    final q = select(episodes).join([
+      innerJoin(works, works.id.equalsExp(episodes.workId)),
+      innerJoin(feeds, feeds.id.equalsExp(episodes.feedId)),
+    ])
+      ..where(episodes.workId.equals(workId) & episodes.dedupReason.isNull());
+    final r = await q.getSingleOrNull();
+    if (r == null) return null;
+    return (
+      work: r.readTable(works),
+      episode: r.readTable(episodes),
+      feedTitle: _sourceTitle(r),
+    );
+  }
+
+  /// "Mark everything older as played" from Latest: every unplayed audio
+  /// item published strictly before [publishedBeforeMs], across the whole
+  /// archive rather than the loaded page. Strictly, as on the podcast
+  /// page, so a tie is never swept up because of where the list put it.
+  Future<List<({Work work, Episode episode})>> olderUnplayedAudio(
+      int profileId,
+      {required int publishedBeforeMs}) async {
+    final q = select(episodes).join([
+      innerJoin(works, works.id.equalsExp(episodes.workId)),
+    ])
+      ..where(works.profileId.equals(profileId) &
+          episodes.dedupReason.isNull() &
+          episodes.enclosureUrl.isNotNull() &
+          episodes.finishedAtMs.isNull() &
+          episodes.publishedAtMs.isSmallerThanValue(publishedBeforeMs))
+      ..orderBy([
+        OrderingTerm.desc(episodes.publishedAtMs),
+        OrderingTerm.desc(episodes.workId),
+      ]);
+    return [
+      for (final r in await q.get())
+        (work: r.readTable(works), episode: r.readTable(episodes)),
+    ];
+  }
+
+  /// One feed's own episodes for the podcast page, by publish date:
+  /// newest first unless [oldestFirst]. Unlike [riverItems] it is scoped
+  /// to one feed, and the direction is the listener's choice.
+  Future<List<({Work work, Episode episode})>> episodesOfFeed(
+    int feedId, {
+    bool oldestFirst = false,
+  }) async {
+    final q =
+        select(
+            episodes,
+          ).join([innerJoin(works, works.id.equalsExp(episodes.workId))])
+          ..where(episodes.feedId.equals(feedId))
+          ..orderBy([
+            oldestFirst
+                ? OrderingTerm.asc(episodes.publishedAtMs)
+                : OrderingTerm.desc(episodes.publishedAtMs),
+          ]);
+    final rows = await q.get();
+    return [
+      for (final r in rows)
+        (work: r.readTable(works), episode: r.readTable(episodes)),
+    ];
+  }
+
+  /// A permanent move: the row follows the show to [url], and keeps the
+  /// address it was first followed at (an earlier move's, if any).
+  Future<void> adoptUrl(int feedId, String url) => customUpdate(
+      'UPDATE feeds SET subscribed_url = COALESCE(subscribed_url, url), '
+      'url = ? WHERE id = ?',
+      variables: [Variable.withString(url), Variable.withInt(feedId)],
+      updates: {feeds});
+
+  Future<void> setOrigin(int feedId, String origin) =>
+      (update(feeds)..where((f) => f.id.equals(feedId)))
+          .write(FeedsCompanion(origin: Value(origin)));
+
+  /// Whether any stored episode of this feed has audio: what keeps a
+  /// podcast on its shelf when one listing happens to carry none.
+  Future<bool> hasAudioEpisodes(int feedId) async {
+    final q = selectOnly(episodes)
+      ..addColumns([episodes.workId])
+      ..where(episodes.feedId.equals(feedId) & episodes.enclosureUrl.isNotNull())
+      ..limit(1);
+    return (await q.get()).isNotEmpty;
+  }
+
+  /// Unplayed episodes per feed for the Subscriptions page, keyed by feed
+  /// id; a feed with none is absent. The same test as the podcast page's
+  /// "N unplayed" (audio, not finished), so the two numbers
+  /// always agree. One grouped query rather than one per feed.
+  Future<Map<int, int>> unplayedCountsOf(int profileId) async {
+    final n = episodes.workId.count();
+    final q = selectOnly(episodes).join([
+      innerJoin(works, works.id.equalsExp(episodes.workId)),
+    ])
+      ..addColumns([episodes.feedId, n])
+      ..where(works.profileId.equals(profileId) &
+          episodes.enclosureUrl.isNotNull() &
+          episodes.finishedAtMs.isNull())
+      ..groupBy([episodes.feedId]);
+    return {
+      for (final r in await q.get()) r.read(episodes.feedId)!: r.read(n)!,
+    };
+  }
+
+  /// Fills an already-stored episode's missing length and artwork from a
+  /// later listing of the feed; never overwrites, so a length the player
+  /// measured stays.
+  Future<void> fillMissingMetadata(int feedId, String guid,
+      {int? durationMs, String? imageUrl}) async {
+    final ep = await (select(episodes)
+          ..where((e) => e.feedId.equals(feedId) & e.guid.equals(guid)))
+        .getSingleOrNull();
+    if (ep == null) return;
+    final fill = EpisodesCompanion(
+      durationMs: ep.durationMs == null && durationMs != null
+          ? Value(durationMs)
+          : const Value.absent(),
+      imageUrl: ep.imageUrl == null && imageUrl != null
+          ? Value(imageUrl)
+          : const Value.absent(),
+    );
+    if (!fill.durationMs.present && !fill.imageUrl.present) return;
+    await (update(episodes)..where((e) => e.workId.equals(ep.workId)))
+        .write(fill);
+  }
+
+  Future<void> setSortOldestFirst(int feedId, bool oldestFirst) =>
+      (update(feeds)..where((f) => f.id.equals(feedId)))
+          .write(FeedsCompanion(sortOldestFirst: Value(oldestFirst)));
+
+  /// The first finish wins, so replaying an episode doesn't move when it
+  /// was played.
+  Future<void> setFinished(int workId, int nowMs) =>
+      (update(episodes)
+            ..where((e) => e.workId.equals(workId) & e.finishedAtMs.isNull()))
+          .write(EpisodesCompanion(finishedAtMs: Value(nowMs)));
+
+  /// "Mark played": the played fact and the seen dot, nothing else.
+  /// Finishing by ear promotes the work (ADR-0003 law 2); marking does
+  /// not, or clearing out a backlog would keep all of it forever.
+  Future<void> markPlayed(int workId, int nowMs) => transaction(() async {
+        await setFinished(workId, nowMs);
+        await (update(episodes)
+              ..where((e) => e.workId.equals(workId) & e.readAtMs.isNull()))
+            .write(EpisodesCompanion(readAtMs: Value(nowMs)));
+      });
+
+  /// "Mark unplayed" also forgets where it stopped, so playing it again
+  /// starts at the top instead of in its last seconds, and forgets the
+  /// day it was finished.
+  Future<void> markUnplayed({required int profileId, required int workId}) =>
+      transaction(() async {
+        await (update(episodes)..where((e) => e.workId.equals(workId)))
+            .write(const EpisodesCompanion(finishedAtMs: Value(null)));
+        // The library's progress and the finished count read this day;
+        // a kept work stays kept.
+        await (update(works)..where((w) => w.id.equals(workId)))
+            .write(const WorksCompanion(finishedEpochDay: Value(null)));
+        await (delete(playerPositions)
+              ..where((p) =>
+                  p.profileId.equals(profileId) & p.workId.equals(workId)))
+            .go();
+        await (delete(positions)
+              ..where((p) =>
+                  p.profileId.equals(profileId) & p.workId.equals(workId)))
+            .go();
+      });
+
+  /// Where each work stands for one listener, in one pass for a whole
+  /// list of rows. A transcribed work keeps its place as a sentence
+  /// (the cursor law), so that sentence is projected back to its start
+  /// time and wins over any raw position left from before the transcript.
+  Future<
+      ({
+        Map<int, int> progressMs,
+        Set<int> transcribed,
+        Map<int, int> fileIdx,
+      })> listeningOf(int profileId) async {
+    final players = await (select(playerPositions)
+          ..where((p) => p.profileId.equals(profileId)))
+        .get();
+    final progress = <int, int>{for (final p in players) p.workId: p.tMs};
+    // Which file an audiobook reached, from the same read.
+    final fileIdx = <int, int>{for (final p in players) p.workId: p.fileIdx};
+    final aligned = selectOnly(alignments, distinct: true)
+      ..addColumns([alignments.workId]);
+    final transcribed = {
+      for (final r in await aligned.get()) r.read(alignments.workId)!,
+    };
+    final projected = select(positions).join([
+      innerJoin(
+          alignments,
+          alignments.workId.equalsExp(positions.workId) &
+              alignments.segmentIdx.equalsExp(positions.segmentIdx)),
+    ])
+      ..where(positions.profileId.equals(profileId));
+    for (final r in await projected.get()) {
+      progress[r.readTable(positions).workId] =
+          r.readTable(alignments).tStartMs;
+    }
+    return (progressMs: progress, transcribed: transcribed, fileIdx: fileIdx);
+  }
+
+  Future<void> markRead(int workId, int nowMs) =>
+      (update(episodes)..where((e) => e.workId.equals(workId))).write(
+        EpisodesCompanion(readAtMs: Value(nowMs)),
+      );
+
+  /// General read-state setter — Undo's restore path for [markRead]
+  /// (Campaign 5's Keep and Let-it-pass are both undoable to whatever
+  /// readAtMs was before, verbatim, including null).
+  Future<void> setReadAt(int workId, int? ms) =>
+      (update(episodes)..where((e) => e.workId.equals(workId)))
+          .write(EpisodesCompanion(readAtMs: Value(ms)));
+
+  Future<void> setDuration(int workId, int durationMs) =>
+      (update(episodes)..where((e) => e.workId.equals(workId))).write(
+        EpisodesCompanion(durationMs: Value(durationMs)),
+      );
+
+  /// [fileIdx] (Campaign 7, ADR-0013) is which file of a multi-file
+  /// audiobook [tMs] is relative to; 0 (the default, and every
+  /// pre-campaign caller) for a single-file work, where there is only
+  /// ever "file 0".
+  ///
+  /// [readAtMs]: as [SpineDao.savePosition]'s, a place read before an
+  /// await never overwrites one written since.
+  Future<void> savePlayerPosition({
+    required int profileId,
+    required int workId,
+    required int tMs,
+    int fileIdx = 0,
+    int? readAtMs,
+  }) {
+    final row = PlayerPositionsCompanion.insert(
+      profileId: profileId,
+      workId: workId,
+      tMs: tMs,
+      fileIdx: Value(fileIdx),
+      updatedAtMs: readAtMs ?? DateTime.now().millisecondsSinceEpoch,
+    );
+    if (readAtMs == null) {
+      return into(playerPositions).insertOnConflictUpdate(row);
+    }
+    return into(playerPositions).insert(row,
+        onConflict: DoUpdate((_) => row,
+            where: (old) => old.updatedAtMs.isSmallerOrEqualValue(readAtMs)));
+  }
+
+  Future<PlayerPosition?> playerPosition({
+    required int profileId,
+    required int workId,
+  }) =>
+      (select(playerPositions)..where(
+            (p) => p.profileId.equals(profileId) & p.workId.equals(workId),
+          ))
+          .getSingleOrNull();
+
+  Future<List<PlayerPosition>> allPlayerPositions() =>
+      select(playerPositions).get();
+
+  /// Deleting a feed takes its unpromoted ephemera with it (ADR-0019);
+  /// a promoted work belongs to the library now — only its river metadata
+  /// goes (its sourceUrl still carries the enclosure).
+  Future<void> deleteFeedCascade(int feedId) => transaction(() async {
+    final q = selectOnly(episodes).join([
+      innerJoin(works, works.id.equalsExp(episodes.workId)),
+    ])
+      ..addColumns([works.id])
+      ..where(episodes.feedId.equals(feedId) &
+          works.persistence.equals('ephemeron'));
+    await db.spineDao
+        .deleteWorks([for (final r in await q.get()) r.read(works.id)!]);
+    await (delete(episodes)..where((e) => e.feedId.equals(feedId))).go();
+    await (delete(feeds)..where((f) => f.id.equals(feedId))).go();
+  });
+}
+
+/// One course's mastery line on the dashboard: how much of it is built.
+typedef CourseMastery = ({String title, int mastered, int total});
+
+/// The parent dashboard's per-profile LIFETIME BUILT view (P5). ADR-0003
+/// law 5: additive totals of what exists — works kept, works finished,
+/// cards mastered, listening reached, words collected, active reading
+/// days (Campaign 4 Phase 5's [ReadingDays] addition). Every number comes
+/// from tables the features already write; the dashboard adds no
+/// bookkeeping of its own and nothing here can express a streak.
+///
+/// [listeningMs] is the furthest audio POSITION reached, summed across
+/// works (max of raw/aligned per work, see below) — NOT measured
+/// wall-clock time spent listening. The common straight-through-no-
+/// seeking case makes these nearly the same number, but re-listening to
+/// the same passage or seeking around can make them diverge; this field
+/// has carried that exact meaning since before Campaign 4 and Phase 5
+/// keeps it, rather than inventing a real duration tracker this pass.
+typedef LifetimeBuilt = ({
+  int worksKept,
+  int worksFinished,
+  int cardsMastered,
+  int wordsCollected,
+  int listeningMs,
+  int timeSavedMs,
+  int activeReadingDays,
+  CourseMastery? currentCourse,
+});
+
+/// The household layer over the per-profile app: the parent-PIN row, profile
+/// rename/delete (the PIN-gated operations), and the dashboard stats.
+@DriftAccessor(
+  tables: [
+    HouseholdPin,
+    Profiles,
+    Works,
+    Positions,
+    PlayerPositions,
+    Alignments,
+    Feeds,
+    Episodes,
+    Courses,
+    Cards,
+    Revlog,
+    WordLedger,
+    ReadingDays,
+  ],
+)
+class HouseholdDao extends DatabaseAccessor<AppDatabase>
+    with _$HouseholdDaoMixin {
+  HouseholdDao(super.db);
+
+  static const _pinRowId = 0;
+
+  Future<HouseholdPinRow?> readPin() => (select(
+    householdPin,
+  )..where((p) => p.id.equals(_pinRowId))).getSingleOrNull();
+
+  /// Upserts THE pin row — set and change are the same write; the
+  /// current-PIN-required law lives in ParentPinService, not here.
+  Future<void> writePin({required String salt, required String hash}) =>
+      into(householdPin).insertOnConflictUpdate(
+        HouseholdPinCompanion.insert(
+          id: Value(_pinRowId),
+          salt: salt,
+          hash: hash,
+        ),
+      );
+
+  Future<void> clearPin() =>
+      (delete(householdPin)..where((p) => p.id.equals(_pinRowId))).go();
+
+  Future<void> renameProfile(int profileId, String name) =>
+      (update(profiles)..where((p) => p.id.equals(profileId))).write(
+        ProfilesCompanion(name: Value(name)),
+      );
+
+  /// Removes a reader and every trace of their data, atomically. Order
+  /// matters: feeds first (deleteFeedCascade takes river metadata and
+  /// unpromoted ephemera), then every remaining work (positions, player
+  /// positions, alignments, layers, segments ride along in deleteWork),
+  /// then courses with their cards and revlog, then the word ledger, then
+  /// the profile row itself.
+  Future<void> deleteProfileCascade(int profileId) => transaction(() async {
+    for (final f in await db.feedsDao.feedsOf(profileId)) {
+      await db.feedsDao.deleteFeedCascade(f.id);
+    }
+    await db.spineDao.deleteWorks(
+        [for (final w in await db.spineDao.worksOf(profileId)) w.id]);
+    for (final c in await db.studyDao.coursesOf(profileId)) {
+      final cardRows = await (select(
+        cards,
+      )..where((x) => x.courseId.equals(c.id))).get();
+      for (final card in cardRows) {
+        await (delete(revlog)..where((r) => r.cardId.equals(card.id))).go();
+      }
+      await (delete(cards)..where((x) => x.courseId.equals(c.id))).go();
+      await (delete(courses)..where((x) => x.id.equals(c.id))).go();
+    }
+    await (delete(
+      wordLedger,
+    )..where((w) => w.profileId.equals(profileId))).go();
+    // Campaign 4 Phase 5: ReadingDays carries a Profiles FK too — left
+    // out here it fails the delete outright with a FOREIGN KEY
+    // constraint error, not a silent orphan.
+    await (delete(
+      readingDays,
+    )..where((r) => r.profileId.equals(profileId))).go();
+    await (delete(profiles)..where((p) => p.id.equals(profileId))).go();
+  });
+
+  /// The dashboard query: what this reader has built, from existing tables
+  /// only. "Mastered" is study_core's own threshold (interval has reached
+  /// [masteryIntervalDays]); the current course is the most recent import.
+  Future<LifetimeBuilt> lifetimeBuiltOf(
+    int profileId, {
+    int masteryIntervalDays = 7,
+  }) async {
+    final workRows = await db.spineDao.worksOf(profileId);
+    final worksKept = workRows.where((w) => w.persistence == 'work').length;
+    final worksFinished = workRows
+        .where((w) => w.finishedEpochDay != null)
+        .length;
+
+    final wc = countAll();
+    final wq = selectOnly(wordLedger)
+      ..addColumns([wc])
+      ..where(wordLedger.profileId.equals(profileId));
+    final wordsCollected = (await wq.getSingle()).read(wc) ?? 0;
+
+    final courseRows = await db.studyDao.coursesOf(profileId);
+    CourseRow? latest;
+    for (final c in courseRows) {
+      if (latest == null ||
+          c.importedAtMs > latest.importedAtMs ||
+          (c.importedAtMs == latest.importedAtMs && c.id > latest.id)) {
+        latest = c;
+      }
+    }
+    var cardsMastered = 0;
+    CourseMastery? currentCourse;
+    for (final c in courseRows) {
+      final states = await db.studyDao.loadCards(c.id);
+      final mastered = states.values
+          .where(
+            (s) => study.isMastered(
+              s.progress,
+              masteryIntervalDays: masteryIntervalDays,
+            ),
+          )
+          .length;
+      cardsMastered += mastered;
+      if (identical(c, latest)) {
+        int total;
+        try {
+          // Import validated this text; parse for the item count so
+          // never-reviewed items still count toward the whole.
+          final course = study.parseCourseString(c.raw);
+          total = course.nodes.fold(0, (a, n) => a + n.items.length);
+        } on FormatException {
+          total = states.length; // a row that no longer parses degrades
+        }
+        currentCourse = (title: c.title, mastered: mastered, total: total);
+      }
+    }
+
+    // Listening reached: per work the MAX of the raw player position and
+    // the aligned listen-position's segment end, summed across works — max,
+    // never sum, because a stale raw row survives the transcript that
+    // superseded it (the cursor law moves writes to Positions).
+    final reached = <int, int>{};
+    final rawRows = await (select(
+      playerPositions,
+    )..where((p) => p.profileId.equals(profileId))).get();
+    for (final r in rawRows) {
+      reached[r.workId] = r.tMs;
+    }
+    final aligned =
+        await (select(positions).join([
+              innerJoin(
+                alignments,
+                alignments.workId.equalsExp(positions.workId) &
+                    alignments.segmentIdx.equalsExp(positions.segmentIdx),
+              ),
+            ])..where(
+              positions.profileId.equals(profileId) &
+                  positions.lastModality.equals('listen'),
+            ))
+            .get();
+    for (final r in aligned) {
+      final workId = r.readTable(positions).workId;
+      final end = r.readTable(alignments).tEndMs;
+      if (end > (reached[workId] ?? 0)) reached[workId] = end;
+    }
+    final listeningMs = reached.values.fold(0, (a, b) => a + b);
+
+    // Offline DSP (Campaign 6, ADR-0012): the lifetime "time saved"
+    // counter — the difference between original and processed durations,
+    // summed across every episode of this profile that has actually been
+    // processed (both columns set together, in one write — see
+    // FeedsDao.setDspResult — so a partial pair never happens). Never
+    // negative per episode, matching the pure `timeSavedMs` law
+    // `dsp_params.dart` unit-tests independently.
+    final episodeRows = await (select(episodes).join([
+      innerJoin(works, works.id.equalsExp(episodes.workId)),
+    ])..where(works.profileId.equals(profileId))).get();
+    var timeSavedMs = 0;
+    for (final r in episodeRows) {
+      final e = r.readTable(episodes);
+      final original = e.dspOriginalDurationMs;
+      final processed = e.dspProcessedDurationMs;
+      if (original == null || processed == null) continue;
+      final diff = original - processed;
+      if (diff > 0) timeSavedMs += diff;
+    }
+
+    final rdc = countAll();
+    final rdq = selectOnly(readingDays)
+      ..addColumns([rdc])
+      ..where(readingDays.profileId.equals(profileId));
+    final activeReadingDays = (await rdq.getSingle()).read(rdc) ?? 0;
+
+    return (
+      worksKept: worksKept,
+      worksFinished: worksFinished,
+      cardsMastered: cardsMastered,
+      wordsCollected: wordsCollected,
+      listeningMs: listeningMs,
+      timeSavedMs: timeSavedMs,
+      activeReadingDays: activeReadingDays,
+      currentCourse: currentCourse,
+    );
+  }
+}
+
+/// The made languages of episodes ([Versions]).
+@DriftAccessor(tables: [Versions])
+class VersionsDao extends DatabaseAccessor<AppDatabase>
+    with _$VersionsDaoMixin {
+  VersionsDao(super.db);
+
+  /// Names [workId] as [originalId] in [lang]; a second put for the same
+  /// work replaces the first.
+  Future<void> put({
+    required int workId,
+    required int originalId,
+    required String lang,
+    String? voice,
+    String? voiceKind,
+    String? clearness,
+  }) =>
+      into(versions).insertOnConflictUpdate(VersionsCompanion.insert(
+        workId: Value(workId),
+        originalId: originalId,
+        lang: lang,
+        voice: Value(voice),
+        voiceKind: Value(voiceKind),
+        clearness: Value(clearness),
+      ));
+
+  /// [workId]'s version row, when it is a version.
+  Future<VersionRow?> versionOf(int workId) =>
+      (select(versions)..where((v) => v.workId.equals(workId)))
+          .getSingleOrNull();
+
+  /// [originalId] in [lang], when it has been made.
+  Future<VersionRow?> versionIn(int originalId, String lang) =>
+      (select(versions)
+            ..where((v) => v.originalId.equals(originalId) & v.lang.equals(lang)))
+          .getSingleOrNull();
+
+  /// Every made language of [originalId].
+  Future<List<VersionRow>> versionsOf(int originalId) =>
+      (select(versions)..where((v) => v.originalId.equals(originalId))).get();
+
+  /// Every version in [lang], as original id to version work id: what a
+  /// whole list asks at once.
+  Future<Map<int, int>> versionsIn(String lang) async => {
+        for (final v
+            in await (select(versions)..where((v) => v.lang.equals(lang))).get())
+          v.originalId: v.workId,
+      };
+}
+
+@DriftDatabase(
+    tables: [Profiles, Works, Segments, Layers, Alignments, Positions, Feeds,
+        Episodes, PlayerPositions, Courses, Cards, Revlog, JobsTable,
+        WordLedger, HouseholdPin, Captures, DailyReviewCards, QueueTable,
+        TranslationSentences, SavedViews, Audiobooks, AudiobookFiles,
+        ReadingDays, DeviceSettings, WorkNotes, CardImages, SegmentLinks,
+        Versions],
+    daos: [ProfilesDao, SpineDao, FeedsDao, StudyDao, JobsDao, LedgerDao,
+        HouseholdDao, CapturesDao, DailyReviewDao, QueueDao, LibraryDao,
+        AudiobooksDao, DeviceSettingsDao, VersionsDao])
+class AppDatabase extends _$AppDatabase {
+  AppDatabase(super.e);
+  AppDatabase.forTesting(super.e);
+
+  @override
+  int get schemaVersion => 37;
+  // There is no v14: it was reserved for the reader-depth campaign, which
+  // landed as v18 after three sibling campaigns merged ahead of it, so the
+  // guard chain skips from 13 to 15. Version gaps are harmless — an
+  // upgrader below 15 still runs every block below in order.
+  //
+  // v19 belongs to Campaign 8 "Babel widens" (two blocks below: `works
+  // .activeTranslationLang` unconditional, `translationSentences.engine`
+  // guarded on `from >= 13`). This branch's own change (Campaign 9 Phase 5,
+  // feeds.imageUrl) chains after both as v20 — an upgrader sitting anywhere
+  // below 20 still runs every block below exactly once, in order, same as
+  // every gap above.
+
+  static const _isWeb = bool.fromEnvironment('dart.library.js_interop');
+
+  /// Twin (feed, guid) rows keep the oldest. A twin nobody kept goes the
+  /// way an unfollowed feed's ephemera go; a kept one stays in the library
+  /// and loses only its river row, as [FeedsDao.deleteFeedCascade] does.
+  Future<void> _foldDuplicateEpisodes() async {
+    final twins = await customSelect('''
+      SELECT e.work_id AS id, w.persistence AS persistence
+      FROM episodes e JOIN works w ON w.id = e.work_id
+      WHERE EXISTS (SELECT 1 FROM episodes k
+        WHERE k.feed_id = e.feed_id AND k.guid = e.guid
+          AND k.work_id < e.work_id)
+    ''').get();
+    if (twins.isEmpty) return;
+    final unkept = <int>[];
+    for (final r in twins) {
+      final id = r.read<int>('id');
+      final persistence = r.read<String>('persistence');
+      // 'decayed' can still be here: the v27 hop that retires it runs later.
+      if (persistence == 'ephemeron' || persistence == 'decayed') {
+        unkept.add(id);
+      } else {
+        await (delete(episodes)..where((e) => e.workId.equals(id))).go();
+      }
+    }
+    await spineDao.deleteWorks(unkept);
+  }
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+        onCreate: (m) async {
+          await m.createAll();
+          // drift's createAll knows nothing of virtual tables or triggers.
+          await installSearchIndex(this);
+          await installIndexes(this);
+        },
+        onUpgrade: (m, from, to) async {
+          if (from < 37) {
+            // v37, one episode in every language: made first, like v36's
+            // links, because every work removal (v26's fold among the hops
+            // below) now clears versions too.
+            await m.createTable(versions);
+          }
+          if (from < 36) {
+            // v36, frozen references: the links of a saved text. First,
+            // not in order: an older hop (v26's fold) removes works, and
+            // every removal now clears their links, so the table must be
+            // there before any hop runs.
+            await m.createTable(segmentLinks);
+          }
+          if (from < 2) {
+            // P2: feeds + river metadata + the no-alignments player fallback.
+            await m.createTable(feeds);
+            await m.createTable(episodes);
+            await m.createTable(playerPositions);
+          }
+          if (from < 3) {
+            // Study slice: imported courses, card SRS state, and the
+            // append-only revlog.
+            await m.createTable(courses);
+            await m.createTable(cards);
+            await m.createTable(revlog);
+          }
+          if (from < 4) {
+            // P3: checkpointed transcription jobs.
+            await m.createTable(jobsTable);
+          }
+          if (from < 5) {
+            // The word ledger (per-profile, NOCASE-deduped, SET NULL
+            // provenance — see [WordLedger]).
+            await m.createTable(wordLedger);
+          }
+          if (from < 6) {
+            // P5 household layer: the optional parent-PIN row (salt +
+            // salted-SHA-256 digest — see [HouseholdPin]).
+            await m.createTable(householdPin);
+          }
+          if (from < 7) {
+            // ADR-0006's settings escape (see [Profiles.preferSystemVoice]).
+            await m.addColumn(profiles, profiles.preferSystemVoice);
+          }
+          if (from >= 2 && from < 8) {
+            // RFC 5005 paged-feed following (see [Feeds.nextPageUrl]).
+            // Guarded on from >= 2: a from < 2 upgrade just created `feeds`
+            // fresh, via the current (already-nextPageUrl-bearing) class
+            // definition — addColumn there would be a duplicate column.
+            await m.addColumn(feeds, feeds.nextPageUrl);
+          }
+          if (from < 9) {
+            // The study crown (see [Profiles.scheduler]).
+            await m.addColumn(profiles, profiles.scheduler);
+          }
+          if (from < 10) {
+            // The study crown, Phase 2 (see [Captures]).
+            await m.createTable(captures);
+          }
+          if (from < 11) {
+            // The study crown, Phase 1 (see [DailyReviewCards]).
+            await m.createTable(dailyReviewCards);
+          }
+          if (from < 12) {
+            // Campaign 1 ("the player earns love"): per-podcast playback
+            // settings, the queue, and audio-only eviction that
+            // never deletes an episode row.
+            if (from >= 2) {
+              // feeds/episodes exist from here on. A migration that starts
+              // BELOW v2 just created them fresh a few lines above (the
+              // `from < 2` block's createTable uses the CURRENT table
+              // definition, which already carries every column below) —
+              // adding these again would collide on a duplicate column.
+              await m.addColumn(feeds, feeds.speedOverride);
+              await m.addColumn(feeds, feeds.skipIntroSeconds);
+              await m.addColumn(feeds, feeds.skipOutroSeconds);
+              await m.addColumn(feeds, feeds.keepLatestAudio);
+              await m.addColumn(episodes, episodes.archivedAtMs);
+            }
+            await m.addColumn(profiles, profiles.keepFinishedInQueue);
+            await m.createTable(queueTable);
+          }
+          if (from < 13) {
+            // ADR-0008 "Babel" Phase 3: the per-work Spanish translation
+            // layer — sentence-indexed rows (finer than [Layers]) plus the
+            // scroll-mode display toggle on the work itself (mirrors
+            // [Works.pinned], a plain per-work bool). No `from >=` lower
+            // bound needed: unlike `feeds` above, neither `works` nor
+            // `translationSentences` is ever freshly created by an earlier
+            // block with this column/table already present, so addColumn/
+            // createTable here is safe for any from < 13.
+            await m.addColumn(works, works.showTranslationLayer);
+            await m.createTable(translationSentences);
+          }
+          if (from < 15) {
+            // Campaign 5 ("triage & rules") Phase 2: saved library filters
+            // (see [SavedViews]). A brand-new table, so no `from >= 2`
+            // guard is needed the way [Feeds.nextPageUrl] and Campaign 1's
+            // columns needed one — nothing before this ever created it.
+            await m.createTable(savedViews);
+            if (from >= 2) {
+              // Phase 3: per-feed rules and cross-feed dedup — feeds and
+              // episodes exist from here on (see the v12 block's own
+              // note for why this guard exists).
+              await m.addColumn(feeds, feeds.rulesJson);
+              await m.addColumn(episodes, episodes.dedupReason);
+              await m.addColumn(episodes, episodes.duplicateOfWorkId);
+            }
+          }
+          if (from < 16) {
+            // Campaign 6 ("the DSP mountain", ADR-0012): the offline
+            // trim-silence/loudness preprocess — per-feed/global opt-in
+            // and the stored original/processed durations the lifetime
+            // "time saved" counter sums.
+            if (from >= 2) {
+              // feeds/episodes exist from here on — see the v12 block's
+              // own comment for why a from < 2 upgrade must NOT repeat
+              // this (the fresh create already carries these columns).
+              await m.addColumn(feeds, feeds.dspEnabled);
+              await m.addColumn(episodes, episodes.dspOriginalDurationMs);
+              await m.addColumn(episodes, episodes.dspProcessedDurationMs);
+            }
+            await m.addColumn(profiles, profiles.dspGlobalDefault);
+          }
+          if (from < 17) {
+            // Campaign 7 ("audiobooks are a door", ADR-0013): the work type
+            // itself (Audiobooks settings + AudiobookFiles rows) is entirely
+            // new — never created anywhere else, so unconditional here,
+            // exactly like courses/cards/jobsTable/wordLedger before it.
+            await m.createTable(audiobooks);
+            await m.createTable(audiobookFiles);
+            if (from >= 2) {
+              // playerPositions exists from v2 on. A from < 2 upgrade just
+              // created it fresh a few lines up, via the CURRENT (already
+              // fileIdx-bearing) class definition — addColumn there would be
+              // a duplicate column, the same reasoning as every column
+              // addition above.
+              await m.addColumn(playerPositions, playerPositions.fileIdx);
+            }
+            if (from >= 10) {
+              // captures exists from v10 on — same reasoning, different
+              // version, because captures (unlike playerPositions) wasn't
+              // part of the v2 baseline.
+              await m.addColumn(captures, captures.fileIdx);
+            }
+          }
+          if (from < 18) {
+            // Campaign 4: reader depth & delight — the whole hop lands
+            // together even though [ReadingDays] isn't read until Phase 5
+            // (see [Profiles.readerPrefsJson]): one hop is spent once.
+            //
+            // DELIBERATELY no `from >= 2` here, unlike feeds.nextPageUrl
+            // two blocks up: that guard exists because feeds is CREATED
+            // fresh inside `if (from < 2)`, via the current (already-
+            // nextPageUrl-bearing) class definition, so an unconditional
+            // addColumn there would double-add it. profiles is never
+            // created inside onUpgrade at all — a from=1 database already
+            // has the table (every prior hop's own profiles addColumn,
+            // from<7 and from<9, carries no lower bound either) — so a
+            // `from >= 2` guard here would SKIP this column entirely for a
+            // from=1 upgrade. Verified empirically: a from>=2 guard here
+            // reproduces "Null check operator used on a null value" in
+            // $ProfilesTable.map on a from=1 fixture (the profiles table
+            // lacking reader_prefs_json), which crashes the very first
+            // ReaderScreen._load() call. Flagged to the orchestrator with
+            // this evidence; kept as `from < 18` pending its reply.
+            await m.addColumn(profiles, profiles.readerPrefsJson);
+            await m.createTable(readingDays);
+          }
+          if (from < 19) {
+            // Campaign 8 "Babel widens" Phase 1: which language a work's
+            // translation layer refers to (see [Works
+            // .activeTranslationLang]). No lower bound — `works`, like
+            // `profiles`, is never created fresh inside onUpgrade at
+            // all, so every path that reaches here still needs it
+            // added, the same reasoning as `works.showTranslationLayer`
+            // itself (the `from < 13` block above) and
+            // `profiles.readerPrefsJson` (the `from < 18` block).
+            await m.addColumn(works, works.activeTranslationLang);
+          }
+          if (from >= 13 && from < 19) {
+            // Campaign 8 "Babel widens" Phase 5: which engine produced a
+            // stored translated sentence (see [TranslationSentences
+            // .engine]). Guarded on `from >= 13`, NOT unconditional —
+            // unlike `works`/`profiles` elsewhere in this file,
+            // `translationSentences` IS created fresh inside onUpgrade,
+            // by the `from < 13` block above. That block's own
+            // `createTable` always uses the CURRENT (this file's, right
+            // now) table definition, which already carries `engine` —
+            // so a `from < 13` upgrade already has this column the
+            // moment `if (from < 13)` finishes, and an unconditional
+            // addColumn here would double-add it. A `from >= 13` upgrade
+            // is the only case where `translationSentences` predates
+            // this column for real (a genuine historical v13-v18
+            // database, built by an older app version that never had
+            // it) — verified empirically: all 12 of this repo's
+            // seed-and-strip migration fixtures target `from` values
+            // between 1 and 12, and every one of them passed unmodified
+            // once this guard was added, because `from >= 13` is false
+            // for all of them and the column their fresh createTable
+            // already carries is never touched again here.
+            await m.addColumn(
+                translationSentences, translationSentences.engine);
+          }
+          if (from >= 2 && from < 20) {
+            // Campaign 9 Phase 5 ("the river gets faces"): channel artwork
+            // URL (see [Feeds.imageUrl]). Guarded on from >= 2 for exactly
+            // the reason [Feeds.nextPageUrl] above is: a from < 2 upgrade
+            // just created `feeds` fresh, via the current (already-
+            // imageUrl-bearing) class definition — addColumn there would
+            // be a duplicate column. Chained after both v19 blocks above
+            // (Campaign 8 "Babel widens") so an upgrader landing anywhere
+            // below 20 runs every hop in order, once each.
+            await m.addColumn(feeds, feeds.imageUrl);
+          }
+          if (from < 21) {
+            // Device-level settings (theme, last active reader). A new
+            // table, so every upgrader simply creates it.
+            await m.createTable(deviceSettings);
+          }
+          if (from >= 4 && from < 22) {
+            // Plain-language failure reasons on job rows. Guarded on
+            // from >= 4: `jobs` is created fresh by the from < 4 block
+            // with this column already present, so adding it again there
+            // would be a duplicate column.
+            await m.addColumn(jobsTable, jobsTable.failureReason);
+          }
+          if (from >= 2 && from < 23) {
+            // ADR-0016: the played fact, an episode's own artwork and the
+            // podcast page's sort. Guarded on from >= 2 like every other
+            // feeds/episodes column: the from < 2 block creates both
+            // tables fresh with these columns already present.
+            await m.addColumn(episodes, episodes.finishedAtMs);
+            await m.addColumn(episodes, episodes.imageUrl);
+            await m.addColumn(feeds, feeds.sortOldestFirst);
+            // Episodes finished by ear before v23 only stamped the work;
+            // the player is the only writer of that day, so it is a safe
+            // stand-in and they fade from the first launch.
+            await customStatement('''
+              UPDATE episodes SET finished_at_ms = (
+                SELECT finished_epoch_day * 86400000 FROM works
+                WHERE works.id = episodes.work_id)
+              WHERE finished_at_ms IS NULL AND work_id IN (
+                SELECT id FROM works WHERE finished_epoch_day IS NOT NULL)
+            ''');
+          }
+          if (from >= 2 && from < 24) {
+            // ADR-0016 section 3: the source's origin. Guarded on from >= 2
+            // like every feeds column. A feed with no stored items yet
+            // keeps the default; its next fresh parse decides, so a podcast
+            // that has never answered doesn't land among the blogs.
+            await m.addColumn(feeds, feeds.origin);
+            await customStatement('''
+              UPDATE feeds SET origin = 'blog'
+              WHERE EXISTS (SELECT 1 FROM episodes WHERE feed_id = feeds.id)
+                AND NOT EXISTS (SELECT 1 FROM episodes
+                  WHERE feed_id = feeds.id AND enclosure_url IS NOT NULL)
+            ''');
+          }
+          if (from < 25) {
+            // ADR-0016 section 4: the search index. Unconditional, since
+            // every table it reads exists by now; a rebuild, since a file
+            // first made at a later schema (every migration fixture)
+            // already carries an index of some shape.
+            await rebuildSearchIndex(this);
+          }
+          if (from < 26) {
+            // ADR-0017: the first secondary indexes. The unique one needs
+            // any twin rows folded first, which only a race could have made.
+            // The fold deletes works, and deleting a work clears its notes,
+            // so their v29 table must already exist (created IF NOT EXISTS;
+            // the v29 block's own create is then a no-op).
+            await m.createTable(workNotes);
+            await _foldDuplicateEpisodes();
+            await installIndexes(this);
+            // Guarded like every feeds column: a from < 2 upgrade made
+            // `feeds` fresh with this column already present.
+            if (from >= 2) await m.addColumn(feeds, feeds.bodyHash);
+          }
+          if (from < 27) {
+            // ADR-0019: nothing decays any more. Whatever a past boot sweep
+            // hid comes back as an ordinary unkept item; what its second
+            // window already deleted is gone, and a feed that still lists
+            // it re-adds it on the next refresh.
+            await customStatement(
+                "UPDATE works SET persistence = 'ephemeron' "
+                "WHERE persistence = 'decayed'");
+            // Paging Latest needs its publish-time index.
+            await installIndexes(this);
+            // `profiles` is never created fresh inside onUpgrade, so the
+            // column is always new here.
+            await m.addColumn(profiles, profiles.latestSeenAtMs);
+          }
+          if (from >= 2 && from < 28) {
+            // Guarded like every feeds column (see bodyHash above).
+            await m.addColumn(feeds, feeds.language);
+            // A feed only learns its language from a fresh parse, and an
+            // unchanged feed answers 304 or matches its hash. Forgetting
+            // both makes the next refresh fetch and parse each feed once;
+            // the guid dedupe keeps the re-ingest from adding anything.
+            await customStatement('UPDATE feeds SET etag = NULL, '
+                'last_modified = NULL, body_hash = NULL');
+          }
+          if (from < 29) {
+            // One transaction: drift writes user_version only after the
+            // hop, and SQLite's DDL is transactional, so a kill mid-hop
+            // (the background check runs it too, in an engine the system
+            // stops on a timer) leaves v28 as it was rather than a file
+            // whose next open fails on a column added twice.
+            await transaction(() async {
+              // 1.5.4: full show notes and the work page's language. Both
+              // unconditional: `works` is never created inside onUpgrade and
+              // `work_notes` is new.
+              await m.createTable(workNotes);
+              await m.addColumn(works, works.readLang);
+              await m.addColumn(works, works.lastMode);
+              await m.addColumn(works, works.lastModeAtMs);
+              // Guarded like every feeds column: the from < 2 block creates
+              // `feeds` fresh with this column already present.
+              if (from >= 2) {
+                await m.addColumn(feeds, feeds.subscribedUrl);
+                await m.addColumn(feeds, feeds.notesFillPending);
+              }
+              // The index is rebuilt whole: it stems now, show notes and
+              // post bodies join the items table, and followed shows get
+              // their own. Folded in here rather than a v30 of its own:
+              // 1.5.4 is still unreleased, and one schema bump per release
+              // keeps the hop count honest. The rebuild also replaces every
+              // v28 file's unguarded show trigger. It builds the tables and
+              // triggers only: SearchBackfill fills them once the app may
+              // write, and search answers by LIKE until then.
+              await rebuildSearchIndex(this);
+              // Stored items get their notes from a full parse of their
+              // feed, which an unchanged feed would skip (304, same hash).
+              // Forgetting every validator would refetch every show on the
+              // first refresh after the upgrade; each show is marked
+              // instead, and refreshes take a few at a time. Only empty
+              // notes are filled; nothing is replaced or removed.
+              await customStatement('UPDATE feeds SET notes_fill_pending = 1 '
+                  'WHERE EXISTS (SELECT 1 FROM episodes e '
+                  'WHERE e.feed_id = feeds.id AND e.enclosure_url IS NOT NULL)');
+            });
+          }
+          if (from >= 2 && from < 30) {
+            // 1.5.5, the share sheet: who shared an item. Guarded like
+            // every episodes column (the from < 2 block creates the table
+            // with it), and in one transaction for the reason v29's is.
+            await transaction(() async {
+              await m.addColumn(episodes, episodes.sourceLabel);
+            });
+          }
+          if (from < 31) {
+            await transaction(() async {
+              // 1.5.5, translation: the run marker, unconditional because
+              // `works` is never created inside onUpgrade.
+              await m.addColumn(works, works.translationRunLang);
+              // Before v19 the only language a work could be translated
+              // into was Spanish, and the reader guessed "Spanish rows
+              // with no active language means Spanish". Written down here
+              // so the reader no longer carries the guess. The display
+              // toggle is left as the reader set it.
+              await customStatement('''
+                UPDATE works SET active_translation_lang = 'es'
+                WHERE active_translation_lang IS NULL
+                  AND EXISTS (SELECT 1 FROM translation_sentences t
+                              WHERE t.work_id = works.id AND t.lang = 'es')
+              ''');
+            });
+          }
+          if (from < 32) {
+            await transaction(() async {
+              // 1.5.8: Translation only / Both, per work. Unconditional:
+              // `works` is never created inside onUpgrade.
+              await m.addColumn(works, works.translationView);
+            });
+          }
+          if (from >= 2 && from < 33) {
+            // 1.6.x: a made episode's voice kind. Guarded like every
+            // episodes column (the from < 2 block creates the table).
+            await transaction(() async {
+              await m.addColumn(episodes, episodes.voiceKind);
+            });
+          }
+          if (from < 34) {
+            // Pictures on cards.
+            await m.createTable(cardImages);
+          }
+          if (from >= 2 && from < 35) {
+            // How clearly a made episode was spoken. Guarded like every
+            // episodes column (the from < 2 block creates the table).
+            await transaction(() async {
+              await m.addColumn(episodes, episodes.clearness);
+            });
+          }
+          if (from >= 2 && from < 37) {
+            // A made episode (guid spoken:<original>:<lang>) becomes a
+            // version of its original. Its work keeps its id, address and
+            // file, so its queue entries, places and captures stay put.
+            // One whose original is gone stays an episode: it still plays.
+            await transaction(() async {
+              await customStatement('''
+                INSERT OR IGNORE INTO versions
+                  (work_id, original_id, lang, voice_kind, clearness)
+                SELECT e.work_id,
+                  CAST(substr(e.guid, 8, instr(substr(e.guid, 8), ':') - 1)
+                    AS INTEGER),
+                  substr(substr(e.guid, 8), instr(substr(e.guid, 8), ':') + 1),
+                  e.voice_kind, e.clearness
+                FROM episodes e
+                WHERE e.guid LIKE 'spoken:%:%'
+                  AND EXISTS (SELECT 1 FROM works o WHERE o.id =
+                    CAST(substr(e.guid, 8, instr(substr(e.guid, 8), ':') - 1)
+                      AS INTEGER) AND o.id != e.work_id)
+              ''');
+              // A kept made episode was in the Library; its episode is
+              // now what the Library shows, so it is kept.
+              await customStatement('''
+                UPDATE works SET persistence = 'work'
+                WHERE persistence != 'work' AND id IN (
+                  SELECT v.original_id FROM versions v
+                  JOIN works m ON m.id = v.work_id
+                  WHERE m.persistence = 'work')
+              ''');
+              await customStatement('''
+                UPDATE works SET kind = 'version'
+                WHERE id IN (SELECT work_id FROM versions)
+              ''');
+              await customStatement('''
+                DELETE FROM episodes
+                WHERE work_id IN (SELECT work_id FROM versions)
+              ''');
+            });
+          }
+        },
+        beforeOpen: (details) async {
+          await customStatement('PRAGMA foreign_keys = ON');
+          // A refresh writing while the UI reads no longer blocks it, and
+          // a commit no longer waits on an fsync per transaction; NORMAL
+          // under WAL can lose the last commits on power loss, never
+          // corrupt. The web build's storage has no shared memory for WAL.
+          if (!_isWeb) {
+            await customSelect('PRAGMA journal_mode = WAL').get();
+            await customStatement('PRAGMA synchronous = NORMAL');
+          }
+          // The same wait configureConnection gives every connection;
+          // a smaller one here undid it for the writer once open.
+          await customStatement('PRAGMA busy_timeout = 15000');
+        },
+      );
+}

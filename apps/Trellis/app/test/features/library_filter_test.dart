@@ -1,0 +1,232 @@
+import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:trellis/db/database.dart' hide Alignment;
+import 'package:trellis/main.dart';
+import '../support/pick_reader.dart';
+import '../support/tabs.dart';
+
+/// Phase 2 (Campaign 5) built the filter and its saved-view persistence.
+/// Campaign 9 Phase 1 modernized the FILTERING half into a live modal
+/// bottom sheet (the device-test user called the old pushed-screen-with-
+/// an-Apply-button flow "dated") — every control here applies immediately
+/// to the list behind it, no separate Apply step. Saved-view management
+/// (save/rename/delete/reorder) stays a pushed screen, reached through a
+/// door inside the sheet.
+void main() {
+  late AppDatabase db;
+  setUp(() => db = AppDatabase.forTesting(NativeDatabase.memory()));
+  tearDown(() => db.close());
+
+  Future<int> seedProfile() => db.profilesDao.create('Ada');
+
+  Future<int> seedWork(
+      {required int profileId,
+      required String kind,
+      required String title,
+      bool pinned = false}) async {
+    final id = await db.spineDao.insertWork(
+        profileId: profileId,
+        kind: kind,
+        title: title,
+        persistence: 'work',
+        firstSeenEpochDay: 100);
+    if (pinned) await db.spineDao.setPinned(id, true);
+    return id;
+  }
+
+  /// Profile and works are seeded directly on [db] BEFORE this runs — the
+  /// picker (not the create screen, since a profile already exists) is
+  /// what a second cold pump of this app always shows.
+  Future<void> pumpApp(WidgetTester tester) async {
+    await tester.pumpWidget(TrellisApp(db: db));
+    await tester.pumpAndSettle();
+    await pickReader(tester, 'Ada');
+    await toTab(tester, 'Library');
+  }
+
+  testWidgets('the filter icon opens the live filter sheet', (tester) async {
+    final profileId = await seedProfile();
+    await seedWork(profileId: profileId, kind: 'book', title: 'A book');
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('open-filter')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('filter-pinned-only')), findsOneWidget);
+  });
+
+  testWidgets(
+      'a kind chip, on the Library itself, narrows the list in one tap',
+      (tester) async {
+    final profileId = await seedProfile();
+    await seedWork(profileId: profileId, kind: 'book', title: 'A book');
+    await seedWork(profileId: profileId, kind: 'article', title: 'An article');
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('library-kind-book')));
+    await tester.pump();
+
+    expect(find.text('A book'), findsOneWidget);
+    expect(find.text('An article'), findsNothing);
+  });
+
+  testWidgets('a pinned-only filter keeps only pinned works, live',
+      (tester) async {
+    final profileId = await seedProfile();
+    await seedWork(
+        profileId: profileId, kind: 'book', title: 'Kept close', pinned: true);
+    await seedWork(profileId: profileId, kind: 'book', title: 'Not pinned');
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('open-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('filter-pinned-only')));
+    await tester.pump();
+
+    expect(find.text('Kept close'), findsOneWidget);
+    expect(find.text('Not pinned'), findsNothing);
+  });
+
+  testWidgets('"Clear all" inside the sheet resets every control live',
+      (tester) async {
+    final profileId = await seedProfile();
+    await seedWork(
+        profileId: profileId, kind: 'book', title: 'A book', pinned: true);
+    await seedWork(profileId: profileId, kind: 'article', title: 'An article');
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('open-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('filter-pinned-only')));
+    await tester.pump();
+    expect(find.text('An article'), findsNothing);
+
+    await tester.tap(find.byKey(const Key('filter-clear-all')));
+    await tester.pump();
+    expect(find.text('An article'), findsOneWidget);
+    expect(find.text('A book'), findsOneWidget);
+  });
+
+  testWidgets(
+      "the AppBar icon toggles to a one-tap clear once a filter is live, "
+      'even after the sheet is dismissed', (tester) async {
+    final profileId = await seedProfile();
+    await seedWork(
+        profileId: profileId, kind: 'book', title: 'A book', pinned: true);
+    await seedWork(profileId: profileId, kind: 'article', title: 'An article');
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('open-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('filter-pinned-only')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('filter-sheet-done')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('An article'), findsNothing);
+
+    await tester.tap(find.byKey(const Key('open-filter')));
+    await tester.pumpAndSettle();
+    expect(find.text('An article'), findsOneWidget);
+    expect(find.text('A book'), findsOneWidget);
+  });
+
+  testWidgets(
+      'saving the current live filter as a view (via "Saved views" inside '
+      'the sheet) creates a chip; tapping it re-applies the filter',
+      (tester) async {
+    final profileId = await seedProfile();
+    await seedWork(profileId: profileId, kind: 'book', title: 'A book');
+    await seedWork(profileId: profileId, kind: 'article', title: 'An article');
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('library-kind-book')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('open-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('open-saved-views')));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+        find.byKey(const Key('filter-view-name')), 'Books only');
+    await tester.tap(find.byKey(const Key('filter-save-view')));
+    await tester.pumpAndSettle();
+
+    // Saving applied it too, and popped back to the library.
+    expect(find.text('A book'), findsOneWidget);
+    expect(find.text('An article'), findsNothing);
+    expect(find.byKey(const Key('saved-view-Books only')), findsOneWidget);
+
+    // All shows every kind again.
+    await tester.tap(find.byKey(const Key('library-kind-all')));
+    await tester.pumpAndSettle();
+    expect(find.text('An article'), findsOneWidget);
+    expect(find.text('A book'), findsOneWidget);
+
+    // Tapping the chip re-applies the saved view.
+    await tester.tap(find.byKey(const Key('saved-view-Books only')));
+    await tester.pumpAndSettle();
+    expect(find.text('A book'), findsOneWidget);
+    expect(find.text('An article'), findsNothing);
+  });
+
+  testWidgets(
+      'deleting a saved view from the management screen removes its chip',
+      (tester) async {
+    final profileId = await seedProfile();
+    await seedWork(profileId: profileId, kind: 'book', title: 'A book');
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('open-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('open-saved-views')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const Key('filter-view-name')), 'Everything');
+    await tester.tap(find.byKey(const Key('filter-save-view')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('saved-view-Everything')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('open-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('open-saved-views')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('delete-view-Everything')));
+    await tester.pumpAndSettle();
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('saved-view-Everything')), findsNothing);
+  });
+
+  // A tap on the bin deleted the view outright, with no way back (rollout
+  // concern 9). The tap is deliberate, so it does not ask; it offers an
+  // Undo that stays until the person acts or leaves (fleet delete ruling).
+  testWidgets('deleting a saved view offers an Undo that brings it back',
+      (tester) async {
+    final profileId = await seedProfile();
+    await seedWork(profileId: profileId, kind: 'book', title: 'A book');
+    await db.libraryDao.createSavedView(
+        profileId: profileId, name: 'Everything', queryJson: '{}', nowMs: 0);
+    await pumpApp(tester);
+
+    await tester.tap(find.byKey(const Key('open-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('open-saved-views')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('delete-view-Everything')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('saved-view-Everything')), findsNothing);
+    expect(find.text('Undo'), findsOneWidget);
+    // Still there to come back: nothing is gone until the offer lapses.
+    await tester.pump(const Duration(seconds: 30));
+    expect(find.text('Undo'), findsOneWidget, reason: 'Undo never times out');
+
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('saved-view-Everything')), findsOneWidget);
+    expect(await db.libraryDao.savedViewsOf(profileId), hasLength(1));
+  });
+}

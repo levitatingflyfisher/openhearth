@@ -1,0 +1,448 @@
+/// Feed-item ingestion into the spine (ADR-0002): every item IS a work —
+/// audio items are `episode` works whose sourceUrl is the enclosure, text
+/// items are `article` works whose sourceUrl is the link. All arrive as
+/// ephemera, and stay in Latest for good; promotion is the user's hand
+/// (ADR-0019).
+///
+/// Also here: the published-date parser (comms_core deliberately leaves feed
+/// dates raw — the donor never parsed them at that layer) and the breaker
+/// state's persisted-json codec.
+library;
+
+import 'dart:convert';
+
+import 'package:comms_core/comms_core.dart';
+import 'package:drift/drift.dart' show InsertMode, Value, Variable;
+import 'package:flutter/foundation.dart' show compute;
+import 'package:intake_core/intake_core.dart';
+
+import '../../db/busy_retry.dart';
+import '../../db/database.dart';
+import '../intake/epub_flatten.dart' show SegmentRow;
+import 'feed_rules.dart';
+
+/// RFC-822/1123 (`Wed, 05 Aug 2026 12:00:00 +0200`, seconds and weekday
+/// optional, numeric or named zone) or ISO-8601. Null on garbage — the
+/// caller falls back to arrival time, keeping the river's one ordering
+/// honest rather than inventing a date.
+int? parsePublishedMs(String raw) {
+  final t = raw.trim();
+  if (t.isEmpty) return null;
+  final m = _rfc822.firstMatch(t);
+  if (m != null) {
+    final month = _months.indexOf(m.group(2)!.toLowerCase());
+    if (month >= 0) {
+      var year = int.parse(m.group(3)!);
+      if (year < 100) year += year >= 70 ? 1900 : 2000; // RFC-822 two-digit
+      final utc = DateTime.utc(
+        year,
+        month + 1,
+        int.parse(m.group(1)!),
+        int.parse(m.group(4)!),
+        int.parse(m.group(5)!),
+        int.parse(m.group(6) ?? '0'),
+      );
+      final offsetMin = _zoneOffsetMinutes(m.group(7));
+      return utc
+          .subtract(Duration(minutes: offsetMin))
+          .millisecondsSinceEpoch;
+    }
+  }
+  final iso = DateTime.tryParse(t);
+  return iso?.toUtc().millisecondsSinceEpoch;
+}
+
+final _rfc822 = RegExp(
+    r'^(?:[A-Za-z]{3},\s*)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{2,4})\s+'
+    r'(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s+(\S+))?$');
+
+const _months = [
+  'jan', 'feb', 'mar', 'apr', 'may', 'jun', //
+  'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+];
+
+/// RFC-822 zone → minutes east of UTC. Unknown named zones read as UTC
+/// (the RFC's own advice for unrecognized zones).
+int _zoneOffsetMinutes(String? zone) {
+  if (zone == null || zone.isEmpty) return 0;
+  final num = RegExp(r'^([+-])(\d{2})(\d{2})$').firstMatch(zone);
+  if (num != null) {
+    final sign = num.group(1) == '-' ? -1 : 1;
+    return sign *
+        (int.parse(num.group(2)!) * 60 + int.parse(num.group(3)!));
+  }
+  return switch (zone.toUpperCase()) {
+    'EDT' => -4 * 60,
+    'EST' || 'CDT' => -5 * 60,
+    'CST' || 'MDT' => -6 * 60,
+    'MST' || 'PDT' => -7 * 60,
+    'PST' => -8 * 60,
+    _ => 0, // GMT, UT, UTC, Z, unknown
+  };
+}
+
+/// The breaker fields that persist on the feed row ([Feeds.breakerJson]).
+/// URL, title and validators live in their own columns; this json carries
+/// only the transition state comms_core owns.
+String encodeBreakerState(FeedRefreshState s) => jsonEncode({
+      'consecutiveFailures': s.consecutiveFailures,
+      'broken': s.broken,
+      if (s.lastError != null) 'lastError': s.lastError,
+      if (s.throttledUntilMs != null) 'throttledUntilMs': s.throttledUntilMs,
+      if (s.lastCheckedMs != null) 'lastCheckedMs': s.lastCheckedMs,
+      if (s.nextAttemptMs != null) 'nextAttemptMs': s.nextAttemptMs,
+    });
+
+FeedRefreshState decodeBreakerState(
+    {required String url,
+    required String title,
+    required String? etag,
+    required String? lastModified,
+    required String json}) {
+  Map<String, Object?> m;
+  try {
+    m = (jsonDecode(json) as Map).cast<String, Object?>();
+  } catch (_) {
+    m = const {};
+  }
+  return FeedRefreshState(
+    url: url,
+    title: title,
+    etag: etag,
+    lastModified: lastModified,
+    consecutiveFailures: (m['consecutiveFailures'] as num?)?.toInt() ?? 0,
+    broken: m['broken'] as bool? ?? false,
+    lastError: m['lastError'] as String?,
+    throttledUntilMs: (m['throttledUntilMs'] as num?)?.toInt(),
+    lastCheckedMs: (m['lastCheckedMs'] as num?)?.toInt(),
+    nextAttemptMs: (m['nextAttemptMs'] as num?)?.toInt(),
+  );
+}
+
+/// Convenience: a feed row → the pure refresh state comms_core transitions.
+FeedRefreshState stateOfFeed(Feed feed) => decodeBreakerState(
+    url: feed.url,
+    title: feed.title,
+    etag: feed.etag,
+    lastModified: feed.lastModified,
+    json: feed.breakerJson);
+
+/// The work's body, as spine segments (Campaign 9 Phase 4, "the feed
+/// becomes honest reading"). A podcast episode (an enclosure present)
+/// ALWAYS keeps its show-notes as [item.desc] — that is what show-notes
+/// are, and the library-noise complaint about them is a persistence
+/// concern (see the library query), not a content one. A text item whose
+/// [FeedItem.contentHtml] is present and meaningfully longer than [desc]
+/// (the excerpt actually has more to it — a Substack-shaped feed) gets its
+/// segments from the FULL post instead, through intake_core's OWN
+/// `extractArticle` — the exact function URL intake already runs HTML
+/// through (`article_fetch.dart`); writing a second HTML-to-segments path
+/// is exactly what the fleet's "no second copy" law forbids. A feed whose
+/// content:encoded merely repeats the excerpt (some hosts do) falls back
+/// to the plain desc segment, same as before this phase.
+List<SegmentRow> _segmentsFor(FeedItem item) {
+  final html = item.contentHtml;
+  if (item.enclosure == null && html != null) {
+    final article = extractArticle(html);
+    final paragraphs = [
+      for (final block in article.blocks)
+        if (block is TextBlock) block.text,
+    ];
+    final fullText = paragraphs.join('\n\n');
+    if (fullText.length > item.desc.length) {
+      return [
+        for (var i = 0; i < paragraphs.length; i++)
+          (idx: i, kind: 'prose', text: paragraphs[i]),
+      ];
+    }
+  }
+  if (item.desc.isNotEmpty) {
+    return [(idx: 0, kind: 'prose', text: item.desc)];
+  }
+  return const [];
+}
+
+/// Sanitized notes and their plain words, ready for `work_notes`.
+typedef CleanNotes = ({String html, String plain});
+
+/// What one feed item becomes before any lock is taken: its body as
+/// segments and, for an audio item that carries notes, those notes
+/// cleaned. A body with nothing readable left is stored empty, so the next
+/// refresh doesn't clean it again.
+typedef PreparedItem = ({List<SegmentRow> segments, CleanNotes? notes});
+
+/// Prepares each item, keyed by [guidOf]. Top-level so a whole listing's
+/// worth can run on another isolate in one hop.
+Map<String, PreparedItem> prepareFeedItems(List<FeedItem> items) => {
+      for (final item in items) guidOf(item): _prepare(item),
+    };
+
+PreparedItem _prepare(FeedItem item) {
+  final raw = item.enclosure == null ? null : item.notesHtml;
+  return (
+    segments: _segmentsFor(item),
+    notes: raw == null
+        ? null
+        : switch (sanitizeNotesHtml(raw)) {
+            final clean? => (html: clean, plain: notesPlainText(clean)),
+            null => (html: '', plain: ''),
+          },
+  );
+}
+
+/// How [ingestFeedItems] moves preparation off the UI isolate. A test
+/// hands in its own to see it was asked.
+typedef PrepareOffload = Future<Map<String, PreparedItem>> Function(
+    List<FeedItem> items);
+
+Future<Map<String, PreparedItem>> prepareOffThread(List<FeedItem> items) =>
+    compute(prepareFeedItems, items);
+
+/// A fresh isolate costs a few milliseconds and a copy of the items, so
+/// only a batch that would stall a frame pays for one: 15 long posts
+/// (one newsletter's feed) took about 90 ms to extract on a desktop, and
+/// the first refresh after the v29 migration cleans a whole back
+/// catalogue's notes.
+bool preparesOffThread(List<FeedItem> items) {
+  if (items.length > offThreadPrepareCount) return true;
+  var chars = 0;
+  for (final item in items) {
+    chars += item.enclosure == null
+        ? item.contentHtml?.length ?? 0
+        : item.notesHtml?.length ?? 0;
+  }
+  return chars >= offThreadPrepareChars;
+}
+
+const offThreadPrepareCount = 40;
+const offThreadPrepareChars = 32 * 1024;
+
+/// Item identity for dedupe: the feed's own guid, else link, else
+/// enclosure URL, else title#date. Many shows link every episode to the
+/// show page, so the link alone kept one episode of a whole catalogue.
+String guidOf(FeedItem item) {
+  if (item.guid.isNotEmpty) return item.guid;
+  return legacyGuidOf(item);
+}
+
+/// The key an item was stored under before 1.6.9 read the feed's guid:
+/// link, else enclosure URL, else title#date.
+String legacyGuidOf(FeedItem item) {
+  if (item.link.isNotEmpty) return item.link;
+  if (item.audio.isNotEmpty) return item.audio;
+  return '${item.title}#${item.date}';
+}
+
+/// Which stored rows, keyed the old way, are [items] under their own
+/// guid: `(stored key, new key)` pairs to rename. [stored] maps each
+/// stored key to its enclosure URL. A link counts as the item's only when
+/// no other item in the listing has it, or when the stored row's audio is
+/// the item's own: of a shared link the old key kept just one episode,
+/// and its audio says which. Each stored row is claimed once.
+List<(String, String)> legacyRenames(
+    List<FeedItem> items, Map<String, String?> stored) {
+  final links = <String, int>{};
+  for (final item in items) {
+    if (item.link.isNotEmpty) links[item.link] = (links[item.link] ?? 0) + 1;
+  }
+  final claimed = <String>{};
+  final renames = <(String, String)>[];
+  for (final item in items) {
+    final key = guidOf(item);
+    final old = legacyGuidOf(item);
+    if (key == old || stored.containsKey(key)) continue;
+    if (!stored.containsKey(old) || claimed.contains(old)) continue;
+    final ownLink = old != item.link || links[item.link] == 1;
+    final ownAudio = item.audio.isNotEmpty && stored[old] == item.audio;
+    if (!ownLink && !ownAudio) continue;
+    claimed.add(old);
+    renames.add((old, key));
+  }
+  return renames;
+}
+
+/// Inserts unseen items as ephemeron works + episode rows in one
+/// transaction. Returns how many were new.
+///
+/// [rules] (Campaign 5 Phase 3), evaluated per item against the FIRST
+/// matching rule (see [evaluateFeedRules]): skip means no row is created
+/// at all — not even counted toward [seen], so a still-skipped item is
+/// simply re-evaluated (and re-skipped) on the next refresh, which is the
+/// honest reading of "never enters"; markReadOnArrival and autoKeep both
+/// insert normally, already in the state Let-it-pass/Keep leave by hand.
+/// An empty (or absent) rule list is every feed's default and behaves
+/// exactly as ingestion did before this parameter existed.
+///
+/// The work is split so the write lock is held only for writing: article
+/// extraction and notes cleaning run first (off the UI isolate for a big
+/// batch, through [offload]), and the transaction then writes each table
+/// in one batched statement rather than three awaited calls per item.
+Future<int> ingestFeedItems(
+    {required AppDatabase db,
+    required int profileId,
+    required int feedId,
+    required List<FeedItem> items,
+    required int nowMs,
+    List<FeedRule> rules = const [],
+    PrepareOffload offload = prepareOffThread}) async {
+  FeedRuleAction? actionOf(FeedItem item) => rules.isEmpty
+      ? null
+      : evaluateFeedRules(rules, title: item.title, description: item.desc);
+
+  // Which items look new, and which stored ones lack notes this listing
+  // carries, read before the lock: only a hint for what to prepare. The
+  // transaction reads both again and those reads decide, so this does not
+  // undo keeping them under the lock; an item the hint missed (another
+  // writer stored or removed it in between) is prepared in place there.
+  final seenHint = await db.feedsDao.guidsOf(feedId);
+  final lackingHint = await db.feedsDao.notesGapsOf(feedId);
+  final hinted = <String>{};
+  final toPrepare = <FeedItem>[];
+  for (final item in items) {
+    final guid = guidOf(item);
+    if (!hinted.add(guid)) continue;
+    final wanted = seenHint.contains(guid)
+        ? lackingHint.contains(guid) && item.notesHtml != null
+        : actionOf(item) != FeedRuleAction.skip;
+    if (wanted) toPrepare.add(item);
+  }
+  final prepared = toPrepare.isEmpty
+      ? const <String, PreparedItem>{}
+      : preparesOffThread(toPrepare)
+          ? await offload(toPrepare)
+          : prepareFeedItems(toPrepare);
+  PreparedItem preparedFor(FeedItem item, String guid) =>
+      prepared[guid] ?? _prepare(item);
+
+  var added = 0;
+  // Another connection (the background check's, ADR-0018) may hold the
+  // write lock; the whole transaction rolls back and runs again.
+  await retryWhileBusy(() => db.transaction(() async {
+    added = 0;
+    // Write first, so the lock is taken before any work is done and the
+    // guids read below are the ones this transaction writes against.
+    // Drift opens with a deferred BEGIN, which takes no lock.
+    await db.customUpdate('UPDATE feeds SET id = id WHERE id = ?',
+        variables: [Variable.withInt(feedId)], updates: const {});
+    // Read inside the transaction: drift runs transactions one at a time,
+    // so a "Try again" overlapping a refresh of the same feed sees what
+    // the other wrote instead of inserting the same items twice.
+    final stored = await db.feedsDao.guidEnclosuresOf(feedId);
+    // Rows stored under the old key take their own guid first, so the
+    // reads below and every later refresh match them directly.
+    for (final (from, to) in legacyRenames(items, stored)) {
+      await db.customUpdate(
+          'UPDATE episodes SET guid = ? WHERE feed_id = ? AND guid = ?',
+          variables: [
+            Variable.withString(to),
+            Variable.withInt(feedId),
+            Variable.withString(from),
+          ],
+          updates: {db.episodes});
+      stored[to] = stored.remove(from);
+    }
+    final seen = stored.keys.toSet();
+    final gaps = await db.feedsDao.metadataGapsOf(feedId);
+    final lacking = await db.feedsDao.notesGapIdsOf(feedId);
+    // Ids are handed out here, under the lock, so every table's rows can
+    // be written in one batch; AUTOINCREMENT never reuses one, so the
+    // sequence is read as well as the largest live id.
+    var nextId = await _lastWorkId(db) + 1;
+    final works = <WorksCompanion>[];
+    final segments = <SegmentsCompanion>[];
+    final episodes = <EpisodesCompanion>[];
+    final notes = <WorkNotesCompanion>[];
+    final fills = <List<Object?>>[];
+    for (final item in items) {
+      final guid = guidOf(item);
+      if (!seen.add(guid)) {
+        final lackingId = lacking[guid];
+        if (lackingId != null && item.notesHtml != null) {
+          final note = preparedFor(item, guid).notes;
+          if (note != null) {
+            notes.add(WorkNotesCompanion.insert(
+                workId: Value(lackingId), html: note.html, plain: note.plain));
+          }
+        }
+        // Items stored before ingest kept length and artwork still lack
+        // them; a later listing fills the gaps. Only a row with a gap this
+        // listing can fill costs a statement.
+        final gap = gaps[guid];
+        if (gap != null &&
+            ((gap.duration && item.durationMs != null) ||
+                (gap.image && item.imageUrl != null))) {
+          fills.add([item.durationMs, item.imageUrl, feedId, guid]);
+        }
+        continue;
+      }
+      final action = actionOf(item);
+      if (action == FeedRuleAction.skip) continue;
+      final enclosureUrl = item.enclosure?.url;
+      // Tracker stripping (Campaign 5 Phase 4, the Miniflux lesson) applies
+      // only to the article LINK, never the enclosure: a signed CDN/audio
+      // URL's query params can be load-bearing, the same reason feed fetch
+      // URLs themselves are never touched. guidOf (above) already ran on
+      // the RAW item — stripping sourceUrl here can never make an
+      // already-seen item look new.
+      final sourceUrl = enclosureUrl ??
+          (item.link.isEmpty ? null : canonicalizeForDedup(item.link));
+      final workId = nextId++;
+      final prep = preparedFor(item, guid);
+      works.add(WorksCompanion.insert(
+          id: Value(workId),
+          profileId: profileId,
+          kind: enclosureUrl != null ? 'episode' : 'article',
+          title: item.title.isEmpty ? 'Untitled' : item.title,
+          // The same transition Keep performs by hand (river_triage.dart).
+          persistence:
+              action == FeedRuleAction.autoKeep ? 'work' : 'ephemeron',
+          firstSeenEpochDay: nowMs ~/ Duration.millisecondsPerDay,
+          sourceUrl: Value(sourceUrl)));
+      for (final r in prep.segments) {
+        segments.add(SegmentsCompanion.insert(
+            workId: workId, idx: r.idx, kind: r.kind, body: r.text));
+      }
+      episodes.add(EpisodesCompanion.insert(
+          workId: Value(workId),
+          feedId: feedId,
+          guid: guid,
+          enclosureUrl: Value(enclosureUrl),
+          durationMs: Value(item.durationMs),
+          imageUrl: Value(item.imageUrl),
+          publishedAtMs: parsePublishedMs(item.date) ?? nowMs,
+          readAtMs: action == null ? const Value.absent() : Value(nowMs)));
+      // Only an audio item's are prepared: a text item's body is its
+      // segments.
+      if (prep.notes case final note?) {
+        notes.add(WorkNotesCompanion.insert(
+            workId: Value(workId), html: note.html, plain: note.plain));
+      }
+      added++;
+    }
+    if (works.isEmpty && notes.isEmpty && fills.isEmpty) return;
+    await db.batch((b) {
+      b.insertAll(db.works, works);
+      b.insertAll(db.segments, segments);
+      b.insertAll(db.episodes, episodes);
+      // Only rows still without notes are filled: a note another writer
+      // stored first wins, and nothing is replaced.
+      b.insertAll(db.workNotes, notes, mode: InsertMode.insertOrIgnore);
+      for (final args in fills) {
+        b.customStatement(
+            'UPDATE episodes SET duration_ms = COALESCE(duration_ms, ?), '
+            'image_url = COALESCE(image_url, ?) '
+            'WHERE feed_id = ? AND guid = ?',
+            args);
+      }
+    });
+  }));
+  return added;
+}
+
+Future<int> _lastWorkId(AppDatabase db) async {
+  final row = await db.customSelect(
+      "SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence "
+      "WHERE name = 'works'), 0), COALESCE((SELECT MAX(id) FROM works), 0)) "
+      'AS n').getSingle();
+  return row.read<int>('n');
+}

@@ -1,0 +1,219 @@
+/// The native side of the bootstrap seam: exactly what main() wired before
+/// the seam existed — the app-support dir roots the P3 device stack, drift
+/// keeps its file database under the documents dir, DeviceServices.real
+/// supplies the platform truth.
+///
+/// The path_provider calls live only in the thin async wrappers; the
+/// channel-free cores ([servicesFor], [databaseFileIn]) carry the wiring
+/// decisions and are what the bootstrap tests pin.
+library;
+
+import 'dart:async';
+import 'dart:io';
+
+import 'package:comms_core/comms_core.dart';
+import 'package:drift/drift.dart' show DatabaseConnection;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
+import 'package:audio_service/audio_service.dart';
+import 'package:drift/native.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:sqlite3/common.dart' show CommonDatabase;
+import 'package:sqlite3/sqlite3.dart' show sqlite3;
+
+import '../db/database.dart';
+import '../features/player/headset_keys.dart';
+import '../features/player/playback_session.dart';
+import '../features/player/trellis_audio_handler.dart';
+import '../features/reader/speech/speech_temp_files.dart';
+import '../net/io_fetcher.dart';
+import '../services/device_services.dart';
+
+/// drift_flutter's native convention: documents-dir/NAME.sqlite, opened
+/// the way its `driftDatabase` opens it, plus a read pool, which it has no
+/// option for. [readPool] is how many reading connections run beside the
+/// writer: the app's one, so a search never queues behind a refresh's
+/// write transaction (1.5.4). The background check (ADR-0018) only
+/// writes and passes none.
+AppDatabase createDb({int readPool = 1}) =>
+    AppDatabase(DatabaseConnection.delayed(Future(() async {
+      // sqlite3's temporary files: the system default may be out of the
+      // sandbox's reach. A process-wide setting, so the readers get it too.
+      sqlite3.tempDirectory ??= (await getTemporaryDirectory()).path;
+      return openNativeConnection(
+          databaseFileIn(await getApplicationDocumentsDirectory()),
+          readPool: readPool);
+    })));
+
+/// The connection [createDb] opens, on a background isolate, with
+/// [readPool] reading isolates beside it. drift sends SELECTs outside a
+/// transaction to the readers and everything else to the writer; under
+/// WAL a reader sees the last commit and never waits for a writer.
+/// (drift_flutter's old-Android workaround is for API levels below the
+/// app's minimum of 24.)
+DatabaseConnection openNativeConnection(File file, {int readPool = 1}) =>
+    NativeDatabase.createBackgroundConnection(file,
+        setup: configureConnection, readPool: readPool);
+
+/// Runs on every native connection, readers included, before drift reads
+/// the schema version, so a second connection (the background feed
+/// check, ADR-0018) waits for the first instead of failing with "database
+/// is locked" mid-migration. AppDatabase's beforeOpen sets the same
+/// timeout again, but only after the migrations, which is too late for an
+/// upgrade. WAL is what lets a reader run beside a write; it persists in
+/// the file, and asking again once it is set changes nothing.
+void configureConnection(CommonDatabase db) {
+  db.execute('PRAGMA busy_timeout = 15000');
+  db.execute('PRAGMA journal_mode = WAL');
+}
+
+/// Where drift keeps the database — named so the storage panel can weigh
+/// the real file, not a guess.
+Future<File?> databaseFile() async =>
+    databaseFileIn(await getApplicationDocumentsDirectory());
+
+/// Channel-free core of [databaseFile]: mirrors drift_flutter's naming law.
+File databaseFileIn(Directory documentsDir) =>
+    File(p.join(documentsDir.path, 'trellis.sqlite'));
+
+/// The P3 device stack rooted in app support (path_provider), database file
+/// threaded through for the storage panel. Also sweeps [speechTempDir]
+/// (ADR-0006): a session killed mid-speech leaves WAVs behind with no
+/// chance to run its own stop()/dispose() cleanup — this is app start's
+/// one shot to reclaim them, and the one place Recently deleted lets go
+/// of what has waited 30 days. Real disk IO, so it belongs here in the async
+/// wrapper, never in [servicesFor]'s channel-free core, and never on the
+/// web side (dart:io Directory operations throw under dart2js).
+Future<DeviceServices> createServices() async {
+  final services = servicesFor(
+    await getApplicationSupportDirectory(),
+    databaseFile: databaseFileIn(await getApplicationDocumentsDirectory()),
+  );
+  await sweepStaleSpeechTempFiles(services.speechTempDir);
+  await purgeRecentlyDeleted(services);
+  // Not awaited: launch never waits on disk housekeeping.
+  unawaited(tidyModels(services));
+  return services;
+}
+
+/// Deletes model files the registry no longer pins (1.5.9: the old
+/// 175-193 MB decoders, Qwen). Prune only: it touches no network
+/// (ADR-0003: no egress at boot without a user gesture). The config
+/// top-up runs where the user asks for translation, and prune never
+/// needs it first, since it judges only files on disk. Never throws: a
+/// model left on disk a while longer harms nothing.
+Future<void> tidyModels(DeviceServices services) async {
+  try {
+    final freed =
+        await services.modelStore.pruneUnreferenced(services.registry);
+    if (freed > 0) debugPrint('Models: pruned $freed bytes no longer pinned');
+  } catch (e) {
+    debugPrint('Models: prune skipped: $e');
+  }
+}
+
+/// Channel-free core of [createServices].
+DeviceServices servicesFor(Directory supportDir, {File? databaseFile}) =>
+    DeviceServices.real(supportDir, databaseFile: databaseFile);
+
+/// The last resort when [createServices] throws — a dead path_provider
+/// channel, a full disk. main() runs the app on this rather than not at
+/// all (boot_guard.dart): the P3 flows that need real paths will say so,
+/// which beats a launch logo that says nothing. Native platforms can use
+/// the placeholder stack directly; the web side overrides this because
+/// [DeviceServices.detached]'s Directory.systemTemp throws under dart2js.
+DeviceServices detachedServices() => DeviceServices.detached();
+
+/// The dart:io HTTP stack, redirect hops SSRF-re-checked (io_fetcher.dart).
+/// [lane] is a web-tier-only concept (Skein exists to dissolve the
+/// browser's CORS wall); native apps fetch directly regardless, so it is
+/// accepted only to keep this signature identical to the web side's.
+HttpFetcher createFetcher({WebFetchLane lane = WebFetchLane.direct}) =>
+    IoHttpFetcher();
+
+/// Campaign 9 Phase 2e (ADR-0015 Decision 3): the lock-screen/pull-down-
+/// tray media session. Since 1.6.0 it is Trellis's own audio_service
+/// handler (features/player/trellis_audio_handler.dart), where it was the
+/// just_audio_background plugin's: same service, same channel, same
+/// icon, so nothing changes in the manifest or the host activity.
+/// `main()` calls this ahead of `runApp`, before any player exists.
+/// `androidNotificationIcon` names Phase 8's own asset
+/// (`drawable-*dpi/ic_notification.png`).
+///
+/// Android/iOS only; the web side's own [createServices]-adjacent stub
+/// (bootstrap_web.dart) is a no-op, so `main()` can call this name
+/// unconditionally on every platform without a check of its own.
+/// Reached by name only, so `res/raw/keep.xml` must list it or the release
+/// shrinker strips it and the first playback notification kills the app.
+const audioNotificationIcon = 'drawable/ic_notification';
+
+/// The same channel the notification has had since 1.5.0: a new id would
+/// leave the old channel orphaned in the phone's settings.
+const audioNotificationChannelId = 'com.openhearth.trellis.channel.audio';
+
+PlaybackSession _playbackSession = const NoPlaybackSession();
+
+/// The media session players report to: nothing until
+/// [initAudioBackground] has run, and still nothing if it failed, in
+/// which case sound plays with no lock-screen controls (boot_guard.dart).
+PlaybackSession get playbackSession => _playbackSession;
+
+/// Stands in a session where no platform can start one, so a test can
+/// press the real handler's keys through the app's own wiring.
+@visibleForTesting
+set debugPlaybackSession(PlaybackSession? session) =>
+    _playbackSession = session ?? const NoPlaybackSession();
+
+/// Lets the media session read what the headset's keys do (1.6.0), once
+/// there is a database to read them from. Before this, and where the
+/// session never started, the keys do their defaults or nothing.
+void bindHeadsetKeys(Future<HeadsetKeys> Function() read) {
+  final session = _playbackSession;
+  if (session is TrellisAudioHandler) session.headsetKeys = read;
+}
+
+/// Hands the media session the player that runs the queue (the shell's,
+/// made after the session starts), so the two episode keys do something.
+void bindEpisodeKeys(
+    {required Future<void> Function() next,
+    required Future<void> Function() previous}) {
+  final session = _playbackSession;
+  if (session is! TrellisAudioHandler) return;
+  session
+    ..onNextEpisode = next
+    ..onPreviousEpisode = previous;
+}
+
+/// Lets go of [next] and its pair, unless a newer shell has already bound
+/// its own: on a change of reader the new shell starts before the old one
+/// is disposed.
+void releaseEpisodeKeys(Future<void> Function() next) {
+  final session = _playbackSession;
+  if (session is! TrellisAudioHandler || session.onNextEpisode != next) return;
+  session
+    ..onNextEpisode = null
+    ..onPreviousEpisode = null;
+}
+
+Future<void> initAudioBackground() async {
+  _playbackSession = await AudioService.init<TrellisAudioHandler>(
+    builder: TrellisAudioHandler.new,
+    config: const AudioServiceConfig(
+      androidNotificationChannelId: audioNotificationChannelId,
+      androidNotificationChannelName: 'Trellis playback',
+      androidNotificationIcon: audioNotificationIcon,
+      androidNotificationOngoing: true,
+    ),
+  );
+}
+
+/// Lets go of deleted transcripts and translations kept 30 days. Never
+/// throws: a failure here would fall back to the detached services, and
+/// a stale copy kept a while longer harms nothing.
+Future<void> purgeRecentlyDeleted(DeviceServices services) async {
+  try {
+    await services.recentlyDeleted?.purgeOlderThan(const Duration(days: 30));
+  } catch (e) {
+    debugPrint('Recently deleted: purge skipped: $e');
+  }
+}

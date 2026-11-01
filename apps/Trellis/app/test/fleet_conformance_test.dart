@@ -1,0 +1,128 @@
+import 'package:oh_fleet_conformance/oh_fleet_conformance.dart';
+
+/// Trellis's recorded fleet posture — every deliberate divergence from
+/// fleet canon lives in this one config, enforced as tests (the fleet's
+/// prime directive: a value is worth exactly the test that fails when it
+/// stops being true).
+void main() => runFleetConformance(const FleetAppConfig(
+      appId: 'trellis',
+      // C7 is ON: the app renders the fleet's Lora/Nunito, which
+      // openhearth_design ships as package fonts (the app bundles no copy
+      // of its own), so every glyph the UI prints must exist in those
+      // cmaps. The ≤/≥ tofu that boxed in Peckish is exactly what this
+      // check exists to catch.
+      //
+      // C2 (sanctuary_backup_ui) is a RECORDED DIVERGENCE, not a gap:
+      // backup here is packages/backup_core on the REAL
+      // sanctuary_auth_core (per-app HKDF domain + AAD) — the .ohbk
+      // envelope carries this app's 11-table spine plus both-donor
+      // migration, which the shared UI package's envelope does not model.
+      // And there is no vault to prune: backups go to a user-chosen file
+      // through the picker, never an app-managed snapshot dir, so
+      // runStartupMaintenance has nothing to maintain. The crypto law C2
+      // exists to protect is kept; the package it names is not used.
+      //
+      // C3's budgets.json carries the first honest numbers: measured from
+      // the v1.0 release artifacts (2026-08-12), then +5% — the ratchet
+      // compares only when build/ artifacts exist, so a plain test run
+      // stays green and a bloated release build fails loudly.
+      //
+      // C8 is ON: the app's two play/pause toggles migrated onto
+      // `OhIconButton.filled` from openhearth_design (the fix for
+      // Campaign 9 Phase 0's "blank circles"), so a bare `IconButton.filled`
+      // or `IconButton.filledTonal` reappearing in lib/ is now a red suite,
+      // not a silent invisible button.
+      checks: {
+        // C13: the PWA loads nothing from Google's CDNs. web/flutter_bootstrap.js
+        // points CanvasKit and the engine's fallback fonts at this origin.
+        FleetCheck.c13WebSelfHosted,
+        FleetCheck.c1Style,
+        FleetCheck.c3Budgets,
+        FleetCheck.c4Permissions,
+        FleetCheck.c6Harness,
+        FleetCheck.c7Fonts,
+        // C7-assetText: C7 over the bundled course (assets/courses/*.ohcourse,
+        // JSON), whose words C7's lib/ sweep never reads.
+        FleetCheck.c7AssetText,
+        FleetCheck.c8IconButtons,
+        // C14: a SnackBar with an action states persist, or Flutter keeps it
+        // up until tapped, across screens.
+        FleetCheck.c14SnackBarPersist,
+        // C10: no raw exception text on screen. It cannot see an error
+        // stored first and shown later, so those sites were fixed by hand
+        // too (boot notice, course/OPML/backup refusals, model and voice
+        // start failures).
+        FleetCheck.c10RawErrors,
+        // C11, strict: a tooltip is not a bar command's name. Every bar
+        // command shows its word (OhBarAction / OhBarOverflow), folding
+        // by space; pinned at 360dp x 1.3 by bar_labels_test.
+        FleetCheck.c11StrictBarLabels,
+        // C12: the accent (OhTheme's warmth, light and hearthDark) stays
+        // apart from the urgency red; the rest of the separation is the
+        // icon + word every error carries.
+        FleetCheck.c12AccentVsError,
+        // C5-primaryScreens: each screen below is swept at 360dp x 1.3
+        // with its primary action reachable, and 320dp x 3.0 without
+        // overflow (test/a11y/primary_action_sweep_test.dart).
+        FleetCheck.c5PrimaryScreens,
+        // C9 (routes) is NOT enabled: Trellis declares no GoRoute (plain
+        // Navigator pushes from one HomeFlow), so C9 would only report
+        // that it has nothing to check. Reachability is covered instead
+        // by the flow tests that walk each door.
+      },
+      barLabelExemptions: {
+        // The reading-mode picker's face (_BarMenuFace, same file) shows
+        // the current mode as a word ("Scroll", "Words", "Lines") beside
+        // its glyph, folding by the bar's space rule. The scan only sees
+        // the call site, where the Text is inside another widget.
+        'lib/features/reader/reader_screen.dart#mode-toggle':
+            'the _BarMenuFace child shows the current mode as a word',
+      },
+      primaryActionScreens: {
+        'LibraryScreen',
+        'RiverScreen',
+        'CoursesScreen',
+        'ReaderScreen',
+        'UrlIntakeScreen',
+        'BackupScreen',
+      },
+      // Tier T: canonical openhearth_design tokens consumed by sibling
+      // path; theme construction stays local (local ThemeData over
+      // package tokens).
+      styleTier: StyleTier.tokens,
+      // The shared design package is found through pub's own resolution
+      // (package_config.json), so the app root sitting one level deeper
+      // than the fleet norm needs no path of its own here.
+      // The exact source-manifest permission surface, both directions —
+      // ADR-0003 law 7 verbatim: INTERNET (podcasts and model downloads),
+      // FOREGROUND_SERVICE + its dataSync (transcription jobs) and
+      // mediaPlayback (the player) subtypes, POST_NOTIFICATIONS (the job
+      // card's notification), WAKE_LOCK (jobs and playback outliving the
+      // screen), and nothing else.
+      androidPermissions: {
+        'android.permission.INTERNET',
+        'android.permission.FOREGROUND_SERVICE',
+        'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
+        'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+        'android.permission.POST_NOTIFICATIONS',
+        'android.permission.WAKE_LOCK',
+      },
+      // C4 v2 — the release MERGED surface, measured from the first real
+      // release build: the six declared above, plus two the merge
+      // process adds. ACCESS_NETWORK_STATE rides in with the player,
+      // foreground-task and WorkManager libraries, and WorkManager's
+      // network constraints use it (ADR-0018). RECEIVE_BOOT_COMPLETED
+      // (foreground_task's restart-at-boot, WorkManager's reboot
+      // reschedule) is tools:node-removed in the source manifest, so its
+      // absence below is enforced too.
+      mergedAndroidPermissions: {
+        'android.permission.INTERNET',
+        'android.permission.FOREGROUND_SERVICE',
+        'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
+        'android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+        'android.permission.POST_NOTIFICATIONS',
+        'android.permission.WAKE_LOCK',
+        'android.permission.ACCESS_NETWORK_STATE',
+        'com.openhearth.trellis.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION',
+      },
+    ));

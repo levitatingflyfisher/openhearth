@@ -1,0 +1,175 @@
+import 'package:flutter/painting.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:trellis/features/reader/reader_prefs.dart';
+
+/// Campaign 4 Phase 1: the per-profile reader-prefs JSON blob (one column,
+/// [Profiles.readerPrefsJson]) — typography for the scroll/print reader.
+/// RSVP and the ticker keep their own tuned displays and are untouched.
+void main() {
+  group('ReaderTypography round-trip', () {
+    test('defaults match the reader\'s existing hardcoded print body', () {
+      const t = ReaderTypography();
+      expect(t.fontScale, 1.0);
+      expect(t.lineHeight, 1.6);
+      expect(t.maxTextWidth, 680);
+      expect(t.paragraphSpacing, 8);
+      expect(t.typeface, ReaderTypeface.lora);
+    });
+
+    test('every field round-trips through JSON', () {
+      const t = ReaderTypography(
+          fontScale: 1.25,
+          lineHeight: 2.0,
+          maxTextWidth: 560,
+          paragraphSpacing: 16,
+          typeface: ReaderTypeface.nunito);
+      final back = ReaderTypography.fromJson(t.toJson());
+      expect(back.fontScale, 1.25);
+      expect(back.lineHeight, 2.0);
+      expect(back.maxTextWidth, 560);
+      expect(back.paragraphSpacing, 16);
+      expect(back.typeface, ReaderTypeface.nunito);
+    });
+
+    test('missing/corrupt JSON decodes to the honest defaults, never throws',
+        () {
+      expect(ReaderTypography.fromJson(null), const ReaderTypography());
+      expect(ReaderTypography.fromJson(const {}), const ReaderTypography());
+      expect(
+          ReaderTypography.fromJson(const {'fontScale': 'not a number'}),
+          const ReaderTypography());
+      expect(
+          ReaderTypography.fromJson(const {'typeface': 'comic-sans'}).typeface,
+          ReaderTypeface.lora,
+          reason: 'an unknown wire name falls back to the bundled default');
+    });
+
+    test('readerTypefaceFontFamily only ever names a bundled face', () {
+      expect(readerTypefaceFontFamily(ReaderTypeface.lora), 'Lora');
+      expect(readerTypefaceFontFamily(ReaderTypeface.nunito), 'Nunito');
+    });
+
+    test('with kReaderFontPackage it resolves to the package font, once',
+        () {
+      // A fresh style and a theme style that already carries the package
+      // both end up with exactly one prefix.
+      const themed =
+          TextStyle(fontFamily: 'Nunito', package: 'openhearth_design');
+      for (final base in [const TextStyle(), themed]) {
+        expect(
+            base
+                .copyWith(
+                    fontFamily: readerTypefaceFontFamily(ReaderTypeface.lora),
+                    package: kReaderFontPackage)
+                .fontFamily,
+            'packages/openhearth_design/Lora');
+      }
+    });
+  });
+
+  group('ReaderPrefs encode/decode (the Profiles.readerPrefsJson codec)', () {
+    test('an empty/corrupt blob decodes to all-default prefs', () {
+      expect(ReaderPrefs.decode('').typography, const ReaderTypography());
+      expect(ReaderPrefs.decode('{}').typography, const ReaderTypography());
+      expect(ReaderPrefs.decode('not json').typography,
+          const ReaderTypography());
+    });
+
+    test('encode -> decode round-trips typography', () {
+      const prefs = ReaderPrefs(
+          typography: ReaderTypography(fontScale: 1.4, lineHeight: 2.0));
+      final back = ReaderPrefs.decode(prefs.encode());
+      expect(back.typography.fontScale, 1.4);
+      expect(back.typography.lineHeight, 2.0);
+    });
+
+    test('copyWith replaces only the given field', () {
+      const prefs = ReaderPrefs(typography: ReaderTypography(fontScale: 1.2));
+      final next = prefs.copyWith(
+          typography: const ReaderTypography(fontScale: 1.2, lineHeight: 2.0));
+      expect(next.typography.fontScale, 1.2);
+      expect(next.typography.lineHeight, 2.0);
+    });
+  });
+
+  group('lastPlayedWorkId (Campaign 9 Phase 2, "resume after restart") — '
+      'a sibling key in the SAME blob, no new column', () {
+    test('defaults to null and round-trips through encode/decode', () {
+      expect(const ReaderPrefs().lastPlayedWorkId, isNull);
+      const prefs = ReaderPrefs(lastPlayedWorkId: 42);
+      final back = ReaderPrefs.decode(prefs.encode());
+      expect(back.lastPlayedWorkId, 42);
+    });
+
+    test('copyWith(lastPlayedWorkId: …) never touches typography, and vice '
+        'versa — the settings screen bug this key would otherwise reproduce',
+        () {
+      const withBoth = ReaderPrefs(
+          typography: ReaderTypography(fontScale: 1.4),
+          lastPlayedWorkId: 7);
+      final typographyOnlyEdit =
+          withBoth.copyWith(typography: const ReaderTypography(fontScale: 1.6));
+      expect(typographyOnlyEdit.lastPlayedWorkId, 7,
+          reason: 'editing typography must never clobber the player\'s own '
+              'key in the shared blob');
+      expect(typographyOnlyEdit.typography.fontScale, 1.6);
+
+      final playerOnlyEdit = withBoth.copyWith(lastPlayedWorkId: 9);
+      expect(playerOnlyEdit.typography.fontScale, 1.4,
+          reason: 'and the reverse: recording a play must never clobber '
+              'typography');
+      expect(playerOnlyEdit.lastPlayedWorkId, 9);
+    });
+
+    test('clearLastPlayedWorkId() removes it even though 0 is falsy-ish', () {
+      const prefs = ReaderPrefs(lastPlayedWorkId: 5);
+      final cleared = prefs.copyWith(clearLastPlayedWorkId: true);
+      expect(cleared.lastPlayedWorkId, isNull);
+      final back = ReaderPrefs.decode(cleared.encode());
+      expect(back.lastPlayedWorkId, isNull);
+    });
+
+    test('a corrupt/non-int value decodes to null, never throws', () {
+      expect(ReaderPrefs.decode('{"lastPlayedWorkId":"not an id"}')
+          .lastPlayedWorkId, isNull);
+    });
+  });
+
+  test('the reading session round-trips and a corrupt one falls back', () {
+    const prefs = ReaderPrefs(
+        session: ReaderSession(
+            mode: 'scroll', wpm: 450, nearbyWords: true, focusSpread: 3.0));
+    expect(ReaderPrefs.decode(prefs.encode()).session, prefs.session);
+    expect(
+        ReaderPrefs.decode('{"session":{"mode":"sideways","wpm":"fast"}}')
+            .session,
+        const ReaderSession());
+    expect(ReaderPrefs.decode('{}').session, const ReaderSession());
+  });
+
+  test('playerClosed (1.5.9) round-trips, keeps the last-played id, and '
+      'defaults to open', () {
+    expect(const ReaderPrefs().playerClosed, isFalse);
+    expect(ReaderPrefs.decode('{"lastPlayedWorkId":3}').playerClosed, isFalse);
+    final closed = const ReaderPrefs(lastPlayedWorkId: 3)
+        .copyWith(playerClosed: true);
+    final back = ReaderPrefs.decode(closed.encode());
+    expect(back.playerClosed, isTrue);
+    expect(back.lastPlayedWorkId, 3);
+    expect(back.copyWith(lastPlayedWorkId: 4).playerClosed, isTrue,
+        reason: 'only an explicit playerClosed changes it');
+  });
+
+  test('read aloud voices (1.5.9) round-trip per language; junk is '
+      'dropped', () {
+    expect(const ReaderPrefs().voices, isEmpty);
+    const prefs = ReaderPrefs(
+        voices: {'ru': 'system:ru-ru-x-rud-local', 'en': 'neural'});
+    final back = ReaderPrefs.decode(prefs.encode());
+    expect(back.voices, prefs.voices);
+    expect(back.copyWith(playerClosed: true).voices, prefs.voices);
+    expect(ReaderPrefs.decode('{"voices":{"ru":3,"en":"default"}}').voices,
+        {'en': 'default'});
+    expect(ReaderPrefs.decode('{"voices":"ru"}').voices, isEmpty);
+  });
+}

@@ -1,0 +1,2277 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:loom_core/loom_core.dart' as core;
+import 'package:trellis/db/database.dart';
+import 'package:trellis/features/player/episode_player.dart';
+import 'package:trellis/features/player/mini_player_bar.dart';
+import 'package:trellis/features/player/player_controller.dart';
+import 'package:trellis/features/player/shake_detector.dart';
+import 'package:trellis/features/player/sleep_timer.dart';
+
+import '../support/fake_player.dart';
+
+/// Episode playback under the cursor law (ADR-0002): when alignments exist,
+/// listening progress writes the SAME Position row the reader reads via a
+/// time→segmentIdx projection; without alignments the honest fallback is a
+/// raw tMs in player_positions. Finishing an episode is the user's hand —
+/// it promotes the ephemeron (ADR-0003 law 2).
+void main() {
+  late AppDatabase db;
+  late FakeEpisodePlayer player;
+  late PlayerController controller;
+  late int profileId;
+  late int feedId;
+  final nowMs = DateTime.utc(2026, 8, 6, 9).millisecondsSinceEpoch;
+  // A mutable clock for the smart-resume tests, which need to advance time
+  // between pause and resume. Every other test never touches it, so it
+  // stays equal to the fixed nowMs above and their assertions are unaffected.
+  late int clockMs;
+  // Counts the sleep timer's haptic-before-stop calls; no test but the
+  // sleep timer ones ever triggers it, so this stays 0 for everyone else.
+  late int hapticCalls;
+
+  // How many players the controller has asked for. Each call gets a fresh
+  // fake (the first is the one `player` already names, so a test can steer
+  // it before the first load) and `player` follows the newest: a
+  // controller that kept using a released player would hit a disposed
+  // fake, which throws.
+  late int playersMade;
+  EpisodePlayer nextPlayer() {
+    if (playersMade > 0) player = FakeEpisodePlayer();
+    playersMade++;
+    return player;
+  }
+
+  setUp(() async {
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+    player = FakeEpisodePlayer();
+    playersMade = 0;
+    profileId = await db.profilesDao.create('Ada');
+    feedId = await db.feedsDao
+        .insertFeed(profileId: profileId, url: 'https://cast.test/feed');
+    clockMs = nowMs;
+    hapticCalls = 0;
+    controller = PlayerController(
+        db: db,
+        profileId: profileId,
+        createPlayer: nextPlayer,
+        now: () => DateTime.fromMillisecondsSinceEpoch(clockMs),
+        haptic: () async {
+          hapticCalls++;
+        });
+  });
+  tearDown(() async {
+    controller.dispose();
+    await db.close();
+  });
+
+  Future<Work> seedEpisode(
+      {String title = 'Ep 1',
+      String enclosure = 'https://cast.test/1.mp3',
+      bool withAlignments = false,
+      int? feedIdOverride}) async {
+    final workId = await db.spineDao.insertWork(
+        profileId: profileId,
+        kind: 'episode',
+        title: title,
+        persistence: 'ephemeron',
+        firstSeenEpochDay: 100,
+        sourceUrl: enclosure);
+    await db.feedsDao.insertEpisode(
+        workId: workId,
+        feedId: feedIdOverride ?? feedId,
+        guid: 'guid-$title',
+        enclosureUrl: enclosure,
+        publishedAtMs: 1000);
+    if (withAlignments) {
+      await db.spineDao.insertSegments(workId, const [
+        (idx: 0, kind: 'prose', text: 'First sentence.'),
+        (idx: 1, kind: 'prose', text: 'Second sentence.'),
+      ]);
+      await db.spineDao.insertAlignments(workId, const [
+        (segmentIdx: 0, tStartMs: 0, tEndMs: 10000),
+        (segmentIdx: 1, tStartMs: 10000, tEndMs: 20000),
+      ]);
+    }
+    return (await db.spineDao.worksOf(profileId))
+        .firstWhere((w) => w.id == workId);
+  }
+
+  group('PlayerController', () {
+    test('playWork loads the enclosure (work.sourceUrl), plays, marks read',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+
+      expect(player.loadedUrl, 'https://cast.test/1.mp3');
+      expect(player.playing, isTrue);
+      expect(controller.current?.id, work.id);
+      expect((await db.feedsDao.episodeOf(work.id))!.readAtMs, nowMs);
+    });
+
+    test('playWork on the current episode toggles pause/resume', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await controller.playWork(work);
+      expect(player.playing, isFalse);
+      await controller.playWork(work);
+      expect(player.playing, isTrue);
+    });
+
+    test('WITHOUT alignments, pause stores raw tMs in player_positions '
+        '— and never invents a Position row', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitPosition(const Duration(seconds: 90));
+
+      await controller.toggle(); // pause
+
+      final raw = await db.feedsDao
+          .playerPosition(profileId: profileId, workId: work.id);
+      expect(raw!.tMs, 90000);
+      expect(await db.spineDao.position(profileId: profileId, workId: work.id),
+          isNull);
+    });
+
+    test('WITH alignments, pause projects time→segmentIdx and writes the '
+        'SAME Position row the reader reads', () async {
+      final work = await seedEpisode(withAlignments: true);
+      await controller.playWork(work);
+      player.emitPosition(const Duration(seconds: 15)); // inside segment 1
+
+      await controller.toggle();
+
+      final pos = await db.spineDao
+          .position(profileId: profileId, workId: work.id);
+      expect(pos!.segmentIdx, 1);
+      expect(pos.lastModality, 'listen');
+      expect(await db.feedsDao.allPlayerPositions(), isEmpty,
+          reason: 'the projection replaces the raw fallback');
+    });
+
+    test('resume WITHOUT alignments seeks to the stored tMs', () async {
+      final work = await seedEpisode();
+      await db.feedsDao.savePlayerPosition(
+          profileId: profileId, workId: work.id, tMs: 60000);
+
+      await controller.playWork(work);
+      expect(player.log, contains('seek:60000'));
+    });
+
+    test('resume WITH alignments projects the reader\'s Position row back '
+        'to audio time (stop reading → resume listening)', () async {
+      final work = await seedEpisode(withAlignments: true);
+      await db.spineDao.savePosition(
+          profileId: profileId,
+          workId: work.id,
+          segmentIdx: 1,
+          wordIdx: 0,
+          lastModality: 'read');
+
+      await controller.playWork(work);
+      expect(player.log, contains('seek:10000'),
+          reason: 'segment 1 starts at 10000ms');
+    });
+
+    test('completion is a finish: the ephemeron is promoted and stamped',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      final after = (await db.spineDao.worksOf(profileId)).single;
+      expect(after.persistence, 'work',
+          reason: 'finishing is the user\'s hand (ADR-0003 law 2)');
+      expect(after.finishedEpochDay, nowMs ~/ Duration.millisecondsPerDay);
+      expect(controller.playing, isFalse);
+    });
+
+    test('a learned duration is written back onto the episode row',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 31));
+      await pumpEventQueue();
+
+      expect((await db.feedsDao.episodeOf(work.id))!.durationMs,
+          31 * 60 * 1000);
+    });
+
+    test('setSpeed clamps to 0.5-4.0 in tenths and reaches the player',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await controller.setSpeed(4.0);
+      expect(controller.speed, 4.0);
+      expect(player.lastSpeed, 4.0);
+      await controller.setSpeed(9);
+      expect(controller.speed, 4.0);
+      await controller.setSpeed(0.1);
+      expect(controller.speed, 0.5);
+      // Tenths, never float drift: 1.2 + 0.1 is 1.3, not 1.3000000000000003.
+      await controller.setSpeed(1.2 + 0.1);
+      expect(controller.speed, 1.3);
+    });
+
+    test('seekBy clamps into [0, duration]', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(seconds: 100));
+      player.emitPosition(const Duration(seconds: 5));
+
+      await controller.seekBy(const Duration(seconds: -15));
+      expect(player.position, Duration.zero);
+
+      player.emitPosition(const Duration(seconds: 95));
+      await controller.seekBy(const Duration(seconds: 30));
+      expect(player.position, const Duration(seconds: 100));
+    });
+
+    test('switching episodes saves the outgoing progress first', () async {
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await controller.playWork(first);
+      player.emitPosition(const Duration(seconds: 42));
+
+      await controller.playWork(second);
+
+      final saved = await db.feedsDao
+          .playerPosition(profileId: profileId, workId: first.id);
+      expect(saved!.tMs, 42000);
+      expect(player.loadedUrl, 'https://cast.test/2.mp3');
+    });
+
+    test('stop saves progress and clears the bar', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitPosition(const Duration(seconds: 30));
+
+      await controller.stop();
+
+      expect(controller.current, isNull);
+      expect((await db.feedsDao
+              .playerPosition(profileId: profileId, workId: work.id))!
+          .tMs, 30000);
+    });
+
+    // 1.5.9, user: "X doesn't reliably close the bar". Each of these was
+    // a way the bar (or the sound) outlived the X.
+    group('stop closes for good', () {
+      PlayerController freshController() {
+        final c = PlayerController(
+            db: db,
+            profileId: profileId,
+            createPlayer: () => FakeEpisodePlayer(),
+            now: () => DateTime.fromMillisecondsSinceEpoch(clockMs));
+        addTearDown(c.dispose);
+        return c;
+      }
+
+      test('a work restored after a restart, not loaded yet, is cleared',
+          () async {
+        final work = await seedEpisode();
+        await controller.playWork(work);
+        await controller.toggle();
+        final fresh = freshController();
+        await fresh.rehydrateLastPlayed();
+        expect(fresh.current, isNotNull);
+
+        await fresh.stop();
+
+        expect(fresh.current, isNull);
+      });
+
+      test('a load still in flight never starts playing after stop',
+          () async {
+        final work = await seedEpisode();
+        final gate = Completer<void>();
+        player.loadGate = gate;
+        final loading = controller.playWork(work);
+        await Future<void>.delayed(Duration.zero);
+
+        await controller.stop();
+        gate.complete();
+        await loading;
+
+        expect(controller.current, isNull);
+        expect(player.log, isNot(contains('play')));
+      });
+
+      test('the audio is released, so the lock screen lets go too',
+          () async {
+        await controller.playWork(await seedEpisode());
+
+        await controller.stop();
+
+        expect(player.disposed, isTrue);
+        expect(controller.isLoaded(1), isFalse);
+      });
+
+      test('a closed player is not restored on the next launch, until '
+          'something plays', () async {
+        final work = await seedEpisode();
+        await controller.playWork(work);
+        await controller.stop();
+
+        final fresh = freshController();
+        await fresh.rehydrateLastPlayed();
+        expect(fresh.current, isNull);
+
+        // The home-screen widget's Play still finds the last work.
+        await fresh.rehydrateLastPlayed(evenIfClosed: true);
+        expect(fresh.current?.id, work.id);
+
+        await controller.playWork(work);
+        final again = freshController();
+        await again.rehydrateLastPlayed();
+        expect(again.current?.id, work.id);
+      });
+
+      test('play after stop loads a fresh player from the saved place',
+          () async {
+        final work = await seedEpisode();
+        await controller.playWork(work);
+        player.emitPosition(const Duration(seconds: 30));
+        await controller.stop();
+        player.log.clear();
+
+        await controller.playWork(work);
+
+        expect(controller.playing, isTrue);
+        expect(player.log, contains('seek:30000'));
+      });
+
+      // The engine sits at zero while it loads; the saved place is only
+      // reached by the seek after it. A save in between wrote zero over
+      // the listener's place.
+      test('X while a restored episode is still loading keeps the saved '
+          'place', () async {
+        final work = await seedEpisode();
+        await db.feedsDao.savePlayerPosition(
+            profileId: profileId, workId: work.id, tMs: 1800000);
+        await db.profilesDao.recordLastPlayed(profileId, work.id);
+        final gate = Completer<void>();
+        final loading = FakeEpisodePlayer()..loadGate = gate;
+        final fresh = PlayerController(
+            db: db, profileId: profileId, createPlayer: () => loading);
+        addTearDown(fresh.dispose);
+        await fresh.rehydrateLastPlayed();
+        unawaited(fresh.toggle());
+        await pumpEventQueue();
+        expect(loading.log, contains('setUrl:https://cast.test/1.mp3'));
+
+        await fresh.stop();
+        gate.complete();
+        await pumpEventQueue();
+
+        expect((await db.feedsDao
+                .playerPosition(profileId: profileId, workId: work.id))!
+            .tMs, 1800000);
+      });
+
+      test('X while loading never moves the reader\'s place either',
+          () async {
+        final work = await seedEpisode(withAlignments: true);
+        await db.spineDao.savePosition(
+            profileId: profileId,
+            workId: work.id,
+            segmentIdx: 1,
+            wordIdx: 0,
+            lastModality: 'read');
+        final gate = Completer<void>();
+        player.loadGate = gate;
+        unawaited(controller.playWork(work));
+        await pumpEventQueue();
+
+        await controller.stop();
+        gate.complete();
+        await pumpEventQueue();
+
+        final pos = await db.spineDao
+            .position(profileId: profileId, workId: work.id);
+        expect(pos!.segmentIdx, 1);
+        expect(pos.lastModality, 'read');
+      });
+
+      test('choosing another episode while one loads keeps the first one\'s '
+          'place, and the first load gives way', () async {
+        final a = await seedEpisode(title: 'A');
+        final b = await seedEpisode(
+            title: 'B', enclosure: 'https://cast.test/2.mp3');
+        await db.feedsDao.savePlayerPosition(
+            profileId: profileId, workId: a.id, tMs: 600000);
+        final gate = Completer<void>();
+        player.loadGate = gate;
+        unawaited(controller.playWork(a));
+        await pumpEventQueue();
+        player.loadGate = null;
+
+        await controller.playWork(b);
+        gate.complete();
+        await pumpEventQueue();
+
+        expect((await db.feedsDao
+                .playerPosition(profileId: profileId, workId: a.id))!
+            .tMs, 600000);
+        expect(controller.current?.id, b.id);
+        expect(player.log, isNot(contains('seek:600000')),
+            reason: 'A\'s load, finishing late, must not seek B to A\'s place');
+      });
+
+      test('X as an episode ends does not start the next one in the queue',
+          () async {
+        final first = await seedEpisode(title: 'One');
+        final second = await seedEpisode(
+            title: 'Two', enclosure: 'https://cast.test/2.mp3');
+        await db.queueDao
+            .playLast(profileId: profileId, workId: first.id, nowMs: 1);
+        await db.queueDao
+            .playLast(profileId: profileId, workId: second.id, nowMs: 2);
+        await controller.playWork(first);
+
+        player.emitCompleted();
+        await controller.stop();
+        await pumpEventQueue();
+
+        expect(controller.current, isNull);
+        expect(controller.playing, isFalse);
+        expect(playersMade, 1, reason: 'nothing was loaded after X');
+      });
+
+      test('Play tapped while X is still letting go of the player waits for '
+          'it, then plays', () async {
+        final work = await seedEpisode();
+        FakeEpisodePlayer? last;
+        final releasing = Completer<void>();
+        final c = PlayerController(
+            db: db,
+            profileId: profileId,
+            createPlayer: () {
+              final prev = last;
+              // Background audio allows one player per process.
+              if (prev != null && !prev.disposeDone) {
+                throw StateError('single player instance');
+              }
+              final p = FakeEpisodePlayer();
+              if (prev == null) p.disposeGate = releasing;
+              return last = p;
+            });
+        addTearDown(c.dispose);
+        await c.playWork(work);
+        final first = last!;
+
+        final stopping = c.stop();
+        final replay = c.playWork(work);
+        await pumpEventQueue();
+        expect(last, same(first));
+        releasing.complete();
+        await stopping;
+        await replay;
+
+        expect(c.current?.id, work.id);
+        expect(c.playing, isTrue);
+        expect(last, isNot(same(first)));
+      });
+
+      test('a load X cancelled leaves no show or synced text behind',
+          () async {
+        final work = await seedEpisode(withAlignments: true);
+        // X at each point the load can be waiting: before it shows, and
+        // while it reads the show and the synced text.
+        for (var ticks = 0; ticks < 12; ticks++) {
+          final loading = controller.playWork(work);
+          for (var i = 0; i < ticks; i++) {
+            await Future<void>.delayed(Duration.zero);
+          }
+          await controller.stop();
+          await loading;
+
+          expect(controller.current, isNull, reason: 'X after $ticks ticks');
+          expect(controller.hasAlignments, isFalse,
+              reason: 'X after $ticks ticks');
+          expect(controller.currentFeed, isNull,
+              reason: 'X after $ticks ticks');
+        }
+      });
+    });
+
+    test('the show\'s artwork is looked up once per show, not per frame',
+        () async {
+      var lookups = 0;
+      final c = PlayerController(
+          db: db,
+          profileId: profileId,
+          createPlayer: nextPlayer,
+          artworkFileFor: (feedId) {
+            lookups++;
+            return File('/nonexistent/art-$feedId.jpg');
+          });
+      addTearDown(c.dispose);
+      await c.playWork(await seedEpisode());
+      final before = lookups;
+
+      for (var i = 0; i < 5; i++) {
+        expect(c.currentArtwork, isNull);
+      }
+
+      expect(lookups - before, lessThanOrEqualTo(1));
+    });
+
+    group('listenFrom — the study crown\'s "Listen from here" verb', () {
+      test('a work not yet playing: starts it and jumps straight to the '
+          'projected audio time (not the stored resume position)', () async {
+        final work = await seedEpisode(withAlignments: true);
+        await db.spineDao.savePosition(
+            profileId: profileId,
+            workId: work.id,
+            segmentIdx: 0,
+            wordIdx: 0,
+            lastModality: 'listen'); // a stale resume point at segment 0
+
+        await controller.listenFrom(
+            work,
+            const core.Position(
+                segmentIdx: 1, wordIdx: 3, lastModality: core.Modality.read));
+
+        expect(player.loadedUrl, work.sourceUrl);
+        expect(player.log.last, 'seek:10000',
+            reason: 'segment 1 starts at 10000ms — the jump wins over the '
+                'stale resume seek that ran first inside playWork');
+      });
+
+      test('the SAME work already playing: always jumps (never toggles '
+          'play/pause the way a re-tapped playWork would)', () async {
+        final work = await seedEpisode(withAlignments: true);
+        await controller.playWork(work);
+        expect(player.playing, isTrue);
+
+        await controller.listenFrom(
+            work,
+            const core.Position(
+                segmentIdx: 1, wordIdx: 0, lastModality: core.Modality.read));
+
+        expect(player.playing, isTrue,
+            reason: 'a deliberate jump, never a toggle');
+        expect(player.log.last, 'seek:10000');
+      });
+
+      test('a work with no alignments: still starts playback, but there is '
+          'nothing to project through, so no seek is forced', () async {
+        final work = await seedEpisode(); // no alignments
+        await controller.listenFrom(
+            work,
+            const core.Position(
+                segmentIdx: 0, wordIdx: 0, lastModality: core.Modality.read));
+
+        expect(player.playing, isTrue);
+        expect(player.log.any((l) => l.startsWith('seek:')), isFalse);
+      });
+    });
+
+    group('capture — the study crown\'s "Capture" verb', () {
+      test('saves a capture at the current playback position, sentence-'
+          'bound immediately when the work is already aligned', () async {
+        final work = await seedEpisode(withAlignments: true);
+        await controller.playWork(work);
+        player.emitPosition(const Duration(seconds: 12)); // inside segment 1
+
+        final id = await controller.capture();
+
+        expect(id, isNotNull);
+        final saved = (await db.capturesDao.capturesOf(work.id)).single;
+        expect(saved.positionMs, 12000);
+        expect(saved.segmentIdx, 1);
+      });
+
+      test('a work with no transcript yet: still saves, unbound', () async {
+        final work = await seedEpisode();
+        await controller.playWork(work);
+        player.emitPosition(const Duration(seconds: 12));
+
+        await controller.capture();
+
+        final saved = (await db.capturesDao.capturesOf(work.id)).single;
+        expect(saved.segmentIdx, isNull);
+      });
+
+      test('nothing playing: a no-op, never throws', () async {
+        expect(await controller.capture(), isNull);
+      });
+    });
+
+    test('smart resume: a pause under a minute rewinds 2s on resume',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitPosition(const Duration(seconds: 100));
+      await controller.toggle(); // pause
+      clockMs += 30000; // 30s later, still under a minute
+
+      await controller.toggle(); // resume
+
+      expect(player.log, contains('seek:${100000 - 2000}'));
+      expect(player.playing, isTrue);
+    });
+
+    test('smart resume: a pause of an hour or more rewinds 10s on resume',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitPosition(const Duration(minutes: 5));
+      await controller.toggle(); // pause
+      clockMs += const Duration(hours: 2).inMilliseconds;
+
+      await controller.toggle(); // resume
+
+      expect(player.log, contains('seek:${5 * 60 * 1000 - 10000}'));
+    });
+
+    test('smart resume never rewinds past zero', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitPosition(const Duration(seconds: 3));
+      await controller.toggle(); // pause
+      clockMs += const Duration(hours: 2).inMilliseconds;
+
+      await controller.toggle(); // resume
+
+      expect(player.log, contains('seek:0'));
+    });
+
+    test('a zero-length pause still rewinds — the <1min bracket has no '
+        'floor', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitPosition(const Duration(seconds: 50));
+
+      await controller.toggle(); // pause
+      await controller.toggle(); // resume, no time elapsed either way
+
+      expect(player.log, contains('seek:${50000 - 2000}'));
+    });
+  });
+
+  group('per-podcast playback settings', () {
+    test('a feed speed override wins over the global speed on start',
+        () async {
+      final work = await seedEpisode();
+      await db.feedsDao.updatePlaybackSettings(feedId, speedOverride: 1.75);
+
+      await controller.playWork(work);
+
+      expect(player.lastSpeed, 1.75);
+      expect(controller.speed, 1.0,
+          reason: 'the global speed itself is untouched by a feed override');
+    });
+
+    test('no override defers to the global speed, unchanged', () async {
+      final work = await seedEpisode();
+
+      await controller.playWork(work);
+
+      expect(player.lastSpeed, 1.0);
+    });
+
+    test('auto-seeks past the intro only when starting fresh (position 0)',
+        () async {
+      final work = await seedEpisode();
+      await db.feedsDao
+          .updatePlaybackSettings(feedId, skipIntroSeconds: 12);
+
+      await controller.playWork(work);
+
+      expect(player.log, contains('seek:12000'));
+    });
+
+    test('never auto-seeks past the intro when resuming a saved position',
+        () async {
+      final work = await seedEpisode();
+      await db.feedsDao
+          .updatePlaybackSettings(feedId, skipIntroSeconds: 12);
+      await db.feedsDao.savePlayerPosition(
+          profileId: profileId, workId: work.id, tMs: 60000);
+
+      await controller.playWork(work);
+
+      expect(player.log, contains('seek:60000'));
+      expect(player.log, isNot(contains('seek:12000')));
+    });
+
+    test('stops/finishes at duration-minus-outro, exactly once even '
+        'across repeated ticks past the cutoff', () async {
+      final work = await seedEpisode();
+      await db.feedsDao
+          .updatePlaybackSettings(feedId, skipOutroSeconds: 30);
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 10));
+
+      // Three ticks past the cutoff (10:00 - 0:30 = 9:30) — a naive
+      // listener re-fires the finish on every one of these.
+      for (final s in [9 * 60 + 30, 9 * 60 + 45, 10 * 60]) {
+        player.emitPosition(Duration(seconds: s));
+        await pumpEventQueue();
+      }
+
+      expect(player.log.where((l) => l == 'pause'), hasLength(1),
+          reason: 'the outro cutoff pauses playback exactly once');
+      final after = (await db.spineDao.worksOf(profileId)).single;
+      expect(after.persistence, 'work');
+      expect(after.finishedEpochDay, nowMs ~/ Duration.millisecondsPerDay);
+    });
+
+    test('no outro setting: playback runs to the true end untouched',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 10));
+
+      player.emitPosition(const Duration(minutes: 9, seconds: 59));
+      await pumpEventQueue();
+
+      expect(player.log, isNot(contains('pause')));
+      expect(controller.current, isNotNull,
+          reason: 'nothing finished it early');
+    });
+  });
+
+  group('the played fact (ADR-0016)', () {
+    test('playing to the end marks the episode played', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitCompleted();
+      await pumpEventQueue();
+      expect((await db.feedsDao.episodeOf(work.id))!.finishedAtMs, nowMs);
+    });
+
+    test('reaching the last 30 seconds marks it played and keeps playing',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 10));
+      player.emitPosition(const Duration(minutes: 9, seconds: 20));
+      await pumpEventQueue();
+      expect((await db.feedsDao.episodeOf(work.id))!.finishedAtMs, isNull,
+          reason: '40 s left is not the end');
+
+      player.emitPosition(const Duration(minutes: 9, seconds: 31));
+      await pumpEventQueue();
+      expect((await db.feedsDao.episodeOf(work.id))!.finishedAtMs, nowMs);
+      expect(player.playing, isTrue,
+          reason: 'the tail of the episode is still heard');
+      expect(controller.current?.id, work.id);
+    });
+
+    test('the outro cutoff marks it played too', () async {
+      final work = await seedEpisode();
+      await db.feedsDao.updatePlaybackSettings(feedId, skipOutroSeconds: 90);
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 10));
+      player.emitPosition(const Duration(minutes: 8, seconds: 31));
+      await pumpEventQueue();
+      expect((await db.feedsDao.episodeOf(work.id))!.finishedAtMs, nowMs);
+    });
+
+    test('a trailer shorter than 30 s is not played on its first tick',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(seconds: 20));
+      player.emitPosition(const Duration(seconds: 1));
+      await pumpEventQueue();
+      expect((await db.feedsDao.episodeOf(work.id))!.finishedAtMs, isNull);
+    });
+
+    test('an episode with no known length is never marked early', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitPosition(const Duration(hours: 3));
+      await pumpEventQueue();
+      expect((await db.feedsDao.episodeOf(work.id))!.finishedAtMs, isNull);
+    });
+  });
+
+  group('Play on something that has played to its end (1.6.0, user: '
+      '"clicking play on the widget doesn\'t always work")', () {
+    Future<Work> playedOut({int? skipIntroSeconds}) async {
+      if (skipIntroSeconds != null) {
+        await db.feedsDao.updatePlaybackSettings(feedId,
+            skipIntroSeconds: skipIntroSeconds);
+      }
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 5));
+      player.emitPosition(const Duration(minutes: 5));
+      player.emitCompleted();
+      await pumpEventQueue();
+      expect(controller.playing, isFalse);
+      player.log.clear();
+      return work;
+    }
+
+    test('starts it again from the beginning, where it used to seek to '
+        'the end and play nothing', () async {
+      await playedOut();
+
+      await controller.toggle();
+
+      expect(player.log, containsAllInOrder(['seek:0', 'play']));
+      expect(player.position, Duration.zero);
+      expect(controller.playing, isTrue);
+    });
+
+    test('the fresh start skips the intro, as any fresh start does',
+        () async {
+      await playedOut(skipIntroSeconds: 20);
+
+      await controller.toggle();
+
+      expect(player.log, containsAllInOrder(['seek:20000', 'play']));
+    });
+
+    test('its second ending is a finish again: the engine is not left '
+        'playing on nothing', () async {
+      await playedOut();
+      await controller.toggle();
+      player.log.clear();
+
+      player.emitPosition(const Duration(minutes: 5));
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(player.log, contains('pause'));
+      expect(controller.playing, isFalse);
+    });
+
+    test('after the app restarts, Play on it starts again too, not at its '
+        'last moment', () async {
+      final work = await seedEpisode();
+      await db.feedsDao.setDuration(work.id, 300000);
+      await db.feedsDao.savePlayerPosition(
+          profileId: profileId, workId: work.id, tMs: 300000);
+      await db.profilesDao.recordLastPlayed(profileId, work.id);
+      await controller.rehydrateLastPlayed();
+
+      await controller.toggle();
+
+      expect(player.log, isNot(contains('seek:300000')));
+      expect(player.position, Duration.zero);
+      expect(player.playing, isTrue);
+    });
+
+    test('a pause ten seconds from the end still resumes there', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 5));
+      player.emitPosition(const Duration(minutes: 4, seconds: 50));
+      await controller.toggle();
+      player.log.clear();
+
+      await controller.toggle();
+
+      expect(player.log, isNot(contains('seek:0')));
+      expect(player.position, const Duration(minutes: 4, seconds: 48),
+          reason: 'the usual two-second step back, not a restart');
+      expect(controller.playing, isTrue);
+    });
+  });
+
+  group('Queue auto-advance', () {
+    test('finishing removes the episode from the queue by default, then '
+        'auto-advances to the new head', () async {
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: first.id, nowMs: 1);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 2);
+      await controller.playWork(first);
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.current?.id, second.id);
+      expect(player.loadedUrl, 'https://cast.test/2.mp3');
+      final remaining = await db.queueDao.queueOf(profileId);
+      expect(remaining.map((r) => r.workId), [second.id],
+          reason: 'the finished episode is gone; the one it advanced to '
+              'is still there, waiting for ITS turn to finish');
+    });
+
+    test('nothing pauses the engine between one episode and the next: a '
+        'pause takes the playback service out of the foreground, and from '
+        'behind the screen Android won\'t let it back (1.6.0)', () async {
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: first.id, nowMs: 1);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 2);
+      await controller.playWork(first);
+      player.log.clear();
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.current?.id, second.id);
+      expect(player.log, isNot(contains('pause')));
+      expect(player.playing, isTrue);
+    });
+
+    test('with another episode queued, an episode still plays to its very '
+        'end: the hand-over comes when the engine says it has ended, and '
+        'the session says "playing" across it (1.6.0, user: "it doesn\'t '
+        'autoplay the next episode")', () async {
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: first.id, nowMs: 1);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 2);
+      await controller.playWork(first);
+      player.emitDuration(const Duration(minutes: 10));
+      player.log.clear();
+
+      player.emitPosition(
+          const Duration(minutes: 9, seconds: 59, milliseconds: 900));
+      await pumpEventQueue();
+      expect(controller.current?.id, first.id,
+          reason: 'a tenth of a second to go is not the end');
+      expect((await db.spineDao.workById(first.id))!.persistence, 'ephemeron');
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.current?.id, second.id);
+      expect(player.loadedUrl, 'https://cast.test/2.mp3');
+      expect(player.log, isNot(contains('pause')));
+      expect((await db.queueDao.queueOf(profileId)).map((r) => r.workId),
+          [second.id]);
+    });
+
+    test('with nothing queued, an episode plays to its very end', () async {
+      final only = await seedEpisode(title: 'One');
+      await controller.playWork(only);
+      player.emitDuration(const Duration(minutes: 10));
+      player.log.clear();
+
+      player.emitPosition(
+          const Duration(minutes: 9, seconds: 59, milliseconds: 900));
+      await pumpEventQueue();
+
+      expect(player.log, isNot(contains('pause')));
+      expect(player.playing, isTrue);
+      expect((await db.spineDao.worksOf(profileId)).single.persistence,
+          'ephemeron',
+          reason: 'not finished until it ends');
+    });
+
+    test('with nothing to follow, the engine is paused at the end',
+        () async {
+      final only = await seedEpisode(title: 'One');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: only.id, nowMs: 1);
+      await controller.playWork(only);
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(player.log, contains('pause'));
+      expect(controller.playing, isFalse);
+    });
+
+    test('the outro cutoff with nothing to follow stops the sound',
+        () async {
+      final only = await seedEpisode(title: 'One');
+      await db.feedsDao
+          .updatePlaybackSettings(feedId, skipOutroSeconds: 30);
+      await controller.playWork(only);
+      player.emitDuration(const Duration(minutes: 10));
+
+      player.emitPosition(const Duration(minutes: 9, seconds: 30));
+      await pumpEventQueue();
+
+      expect(controller.playing, isFalse);
+    });
+
+    test('a next episode that won\'t load leaves the engine paused, not '
+        'held playing on nothing', () async {
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 1);
+      await controller.playWork(first);
+      player.failNextLoad = true;
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.playing, isFalse);
+    });
+
+    test('a tick still reporting the episode before, while the next one '
+        'loads, does not finish the next one', () async {
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await db.feedsDao
+          .updatePlaybackSettings(feedId, skipOutroSeconds: 30);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 1);
+      await controller.playWork(first);
+      player.emitDuration(const Duration(minutes: 10));
+      final gate = Completer<void>();
+      player.loadGate = gate;
+
+      player.emitPosition(const Duration(minutes: 9, seconds: 30));
+      await pumpEventQueue();
+      expect(controller.current?.id, second.id);
+      // The engine has not let go of the old source yet.
+      player.emitPosition(const Duration(minutes: 9, seconds: 31));
+      await pumpEventQueue();
+      gate.complete();
+      await pumpEventQueue();
+
+      expect((await db.feedsDao.episodeOf(second.id))!.finishedAtMs, isNull);
+      expect((await db.queueDao.queueOf(profileId)).map((r) => r.workId),
+          [second.id]);
+    });
+
+    test('the household setting keeps a finished episode in the queue '
+        'instead of removing it', () async {
+      await db.profilesDao.setKeepFinishedInQueue(profileId, true);
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: first.id, nowMs: 1);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 2);
+      await controller.playWork(first);
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      final remaining = await db.queueDao.queueOf(profileId);
+      expect(remaining.map((r) => r.workId), contains(first.id),
+          reason: 'kept, per the household setting');
+    });
+
+    test('with finished episodes kept, advancing still moves on to the '
+        'next one instead of replaying the one that ended', () async {
+      await db.profilesDao.setKeepFinishedInQueue(profileId, true);
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: first.id, nowMs: 1);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 2);
+      await controller.playWork(first);
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.current?.id, second.id);
+      expect(player.loadedUrl, 'https://cast.test/2.mp3');
+    });
+
+    test('with finished episodes kept, an episode put next while one plays '
+        'is not skipped', () async {
+      await db.profilesDao.setKeepFinishedInQueue(profileId, true);
+      final playing = await seedEpisode(title: 'One');
+      final later = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      final next = await seedEpisode(
+          title: 'Next', enclosure: 'https://cast.test/next.mp3');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: playing.id, nowMs: 1);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: later.id, nowMs: 2);
+      await controller.playWork(playing);
+      await db.queueDao
+          .playNext(profileId: profileId, workId: next.id, nowMs: 3);
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.current?.id, next.id);
+    });
+
+    test('with finished episodes kept, a run queued at the head while one '
+        'plays (Play from here) is not skipped', () async {
+      await db.profilesDao.setKeepFinishedInQueue(profileId, true);
+      final playing = await seedEpisode(title: 'One');
+      final later = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      final a = await seedEpisode(
+          title: 'A', enclosure: 'https://cast.test/a.mp3');
+      final b = await seedEpisode(
+          title: 'B', enclosure: 'https://cast.test/b.mp3');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: playing.id, nowMs: 1);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: later.id, nowMs: 2);
+      await controller.playWork(playing);
+      await db.queueDao.playNextAll(
+          profileId: profileId, workIds: [a.id, b.id], nowMs: 3);
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.current?.id, a.id);
+    });
+
+    test('with finished episodes kept, advancing never loops back to one '
+        'already played', () async {
+      await db.profilesDao.setKeepFinishedInQueue(profileId, true);
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: first.id, nowMs: 1);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 2);
+      await controller.playWork(first);
+      player.emitCompleted();
+      await pumpEventQueue();
+      expect(controller.current?.id, second.id);
+      player.log.clear();
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.current?.id, second.id);
+      expect(player.log, isNot(contains('play')));
+    });
+
+    test('with finished episodes kept, the last one in the queue just stops',
+        () async {
+      await db.profilesDao.setKeepFinishedInQueue(profileId, true);
+      final only = await seedEpisode(title: 'One');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: only.id, nowMs: 1);
+      await controller.playWork(only);
+      player.log.clear();
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(player.log, isNot(contains('play')));
+    });
+
+    test('an empty queue after finishing just stops — no crash, nothing '
+        'to advance to', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.current, isNotNull,
+          reason: 'the finished work stays "current" (mirrors today\'s '
+              'no-queue behavior) — nothing pulls it away');
+    });
+
+    test('the outro cutoff also auto-advances — both finish paths funnel '
+        'through the same queue law', () async {
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await db.feedsDao
+          .updatePlaybackSettings(feedId, skipOutroSeconds: 30);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 1);
+      await controller.playWork(first);
+      player.emitDuration(const Duration(minutes: 10));
+
+      player.emitPosition(const Duration(minutes: 9, seconds: 30));
+      await pumpEventQueue();
+
+      expect(controller.current?.id, second.id);
+    });
+
+    test('auto-advance applies the next episode\'s own per-feed settings',
+        () async {
+      final otherFeedId = await db.feedsDao
+          .insertFeed(profileId: profileId, url: 'https://other.test/feed');
+      final first = await seedEpisode(title: 'One');
+      final secondWorkId = await db.spineDao.insertWork(
+          profileId: profileId,
+          kind: 'episode',
+          title: 'Two',
+          persistence: 'ephemeron',
+          firstSeenEpochDay: 100,
+          sourceUrl: 'https://other.test/2.mp3');
+      await db.feedsDao.insertEpisode(
+          workId: secondWorkId,
+          feedId: otherFeedId,
+          guid: 'guid-two',
+          enclosureUrl: 'https://other.test/2.mp3',
+          publishedAtMs: 1000);
+      await db.feedsDao
+          .updatePlaybackSettings(otherFeedId, speedOverride: 1.75);
+      await db.queueDao
+          .playLast(profileId: profileId, workId: secondWorkId, nowMs: 1);
+      await controller.playWork(first);
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(player.lastSpeed, 1.75);
+    });
+  });
+
+  group('sleep timer', () {
+    test('duration mode: remaining counts down from the armed duration',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+
+      controller.startSleepTimer(duration: const Duration(minutes: 30));
+
+      expect(controller.sleepTimerMode, SleepTimerMode.duration);
+      clockMs += const Duration(minutes: 10).inMilliseconds;
+      player.emitPosition(const Duration(minutes: 10));
+      await pumpEventQueue();
+      expect(controller.sleepTimerRemaining, const Duration(minutes: 20));
+    });
+
+    test('fades volume over the final 20 seconds', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      controller.startSleepTimer(duration: const Duration(minutes: 1));
+
+      clockMs += const Duration(seconds: 50).inMilliseconds; // 10s left
+      player.emitPosition(const Duration(seconds: 1));
+      await pumpEventQueue();
+
+      expect(player.lastVolume, closeTo(0.5, 1e-9));
+    });
+
+    test('duration mode pauses playback and resets volume when it fires',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      controller.startSleepTimer(duration: const Duration(minutes: 1));
+
+      clockMs += const Duration(minutes: 1).inMilliseconds;
+      player.emitPosition(const Duration(seconds: 1));
+      await pumpEventQueue();
+
+      expect(player.playing, isFalse);
+      expect(player.lastVolume, 1.0);
+      expect(controller.sleepTimerMode, isNull,
+          reason: 'the timer is consumed once it fires');
+    });
+
+    test('a haptic fires once, shortly before stop', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      controller.startSleepTimer(duration: const Duration(minutes: 1));
+
+      // Three ticks inside the final 3 seconds — the haptic must fire once,
+      // not once per tick.
+      for (final elapsedS in [58, 59, 60]) {
+        clockMs = nowMs + Duration(seconds: elapsedS).inMilliseconds;
+        player.emitPosition(const Duration(seconds: 1));
+        await pumpEventQueue();
+      }
+
+      expect(hapticCalls, 1);
+    });
+
+    test('cancelSleepTimer clears the mode and remaining immediately', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      controller.startSleepTimer(duration: const Duration(minutes: 30));
+
+      controller.cancelSleepTimer();
+
+      expect(controller.sleepTimerMode, isNull);
+      expect(controller.sleepTimerRemaining, isNull);
+    });
+
+    test('extendSleepTimer (shake) adds 10 minutes in duration mode',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      controller.startSleepTimer(duration: const Duration(minutes: 15));
+
+      controller.extendSleepTimer();
+      player.emitPosition(const Duration(seconds: 1));
+      await pumpEventQueue();
+
+      expect(controller.sleepTimerRemaining, const Duration(minutes: 25));
+    });
+
+    test('extendSleepTimer is a no-op in end-of-episode mode', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 40));
+      controller.startSleepTimer(); // null duration == end of episode
+
+      controller.extendSleepTimer();
+
+      expect(controller.sleepTimerMode, SleepTimerMode.endOfEpisode);
+    });
+
+    test('end-of-episode mode: remaining tracks duration minus position',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 20));
+      controller.startSleepTimer();
+
+      player.emitPosition(const Duration(minutes: 18));
+      await pumpEventQueue();
+
+      expect(controller.sleepTimerRemaining, const Duration(minutes: 2));
+    });
+
+    test('end-of-episode mode never explicitly pauses — natural completion '
+        'stops it and clears the timer', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitDuration(const Duration(seconds: 5));
+      controller.startSleepTimer();
+
+      player.emitPosition(const Duration(seconds: 5)); // 0 remaining
+      await pumpEventQueue();
+      expect(player.log, isNot(contains('pause')),
+          reason: 'end-of-episode has no target of its own to pause at — '
+              'natural completion is the only stop');
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.sleepTimerMode, isNull);
+      expect(player.lastVolume, 1.0);
+    });
+
+    test('a duration-mode timer survives natural completion of the '
+        'episode it was armed on', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      controller.startSleepTimer(duration: const Duration(hours: 1));
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(controller.sleepTimerMode, SleepTimerMode.duration,
+          reason: 'a 1-hour bedtime timer should keep running into '
+              'whatever plays next, not die with this episode');
+    });
+
+    test('a fresh playWork resets volume to full', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      controller.startSleepTimer(duration: const Duration(seconds: 20));
+      clockMs += const Duration(seconds: 15).inMilliseconds; // 5s left, fading
+      player.emitPosition(const Duration(seconds: 1));
+      await pumpEventQueue();
+      expect(player.lastVolume, lessThan(1.0));
+
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      await controller.playWork(second);
+
+      expect(player.lastVolume, 1.0);
+    });
+
+    test('a real shake (fed through the injected accelerometer stream) '
+        'extends the timer by 10 minutes', () async {
+      final shakes = StreamController<AccelerationSample>.broadcast(sync: true);
+      addTearDown(shakes.close);
+      final shaky = PlayerController(
+          db: db,
+          profileId: profileId,
+          createPlayer: nextPlayer,
+          now: () => DateTime.fromMillisecondsSinceEpoch(clockMs),
+          accelerometerSamples: () => shakes.stream);
+      addTearDown(shaky.dispose);
+      final work = await seedEpisode();
+      await shaky.playWork(work);
+      shaky.startSleepTimer(duration: const Duration(minutes: 15));
+
+      shakes.add(const AccelerationSample(30, 0, 0));
+
+      expect(shaky.sleepTimerRemaining, const Duration(minutes: 25));
+    });
+
+    test('no accelerometer wired (the default) means shaking is simply '
+        'unavailable — never a crash', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      controller.startSleepTimer(duration: const Duration(minutes: 15));
+      // No accelerometerSamples was given to the shared `controller`; if
+      // arming the timer tried to read a real sensor here, this test would
+      // hang or throw under the plain VM test runner.
+      expect(controller.sleepTimerRemaining, const Duration(minutes: 15));
+    });
+
+    test('cancelling the timer stops listening for shakes — a shake after '
+        'cancel does nothing', () async {
+      final shakes = StreamController<AccelerationSample>.broadcast(sync: true);
+      addTearDown(shakes.close);
+      final shaky = PlayerController(
+          db: db,
+          profileId: profileId,
+          createPlayer: nextPlayer,
+          now: () => DateTime.fromMillisecondsSinceEpoch(clockMs),
+          accelerometerSamples: () => shakes.stream);
+      addTearDown(shaky.dispose);
+      final work = await seedEpisode();
+      await shaky.playWork(work);
+      shaky.startSleepTimer(duration: const Duration(minutes: 15));
+      shaky.cancelSleepTimer();
+
+      shakes.add(const AccelerationSample(30, 0, 0));
+
+      expect(shaky.sleepTimerMode, isNull);
+    });
+  });
+
+  group('Play on an episode that isn’t downloaded (1.6.0, user: "Play for '
+      'download then play")', () {
+    late Directory dir;
+    late bool downloadFirst;
+    late bool mustWait;
+    late Completer<FetchEnd> landing;
+    late List<int> fetched;
+    late List<PlayNotice> notices;
+
+    setUp(() {
+      dir = Directory.systemTemp.createTempSync('trellis-play-fetch');
+      downloadFirst = true;
+      mustWait = false;
+      landing = Completer<FetchEnd>();
+      fetched = [];
+      notices = [];
+    });
+    tearDown(() => dir.deleteSync(recursive: true));
+
+    File fileOf(Work w) => File('${dir.path}/${w.id}.mp3');
+
+    PlayerController make() {
+      final c = PlayerController(
+          db: db,
+          profileId: profileId,
+          createPlayer: nextPlayer,
+          now: () => DateTime.fromMillisecondsSinceEpoch(clockMs),
+          localAudioFileFor: (id, url) => File('${dir.path}/$id.mp3'),
+          downloadFirst: () async => downloadFirst,
+          beginFetch: (work, url) async {
+            fetched.add(work.id);
+            return mustWait ? null : landing.future;
+          })
+        ..onNotice = notices.add;
+      addTearDown(c.dispose);
+      return c;
+    }
+
+    void land(Work w) {
+      fileOf(w).writeAsStringSync('bytes');
+      landing.complete(FetchEnd.landed);
+    }
+
+    test('set to Stream (as it is until chosen), Play streams at once and '
+        'fetches nothing', () async {
+      downloadFirst = false;
+      final c = make();
+      final work = await seedEpisode();
+
+      await c.playWork(work);
+
+      expect(player.loadedUrl, 'https://cast.test/1.mp3');
+      expect(fetched, isEmpty);
+      expect(notices, isEmpty);
+    });
+
+    test('set to Download first, Play fetches it, says so, and plays the '
+        'file once it has landed', () async {
+      final c = make();
+      final work = await seedEpisode();
+
+      final played = c.playWork(work);
+      await pumpEventQueue();
+      expect(fetched, [work.id]);
+      expect(notices, [PlayNotice.downloadingFirst]);
+      expect(player.loadedUrl, isNull, reason: 'nothing streams meanwhile');
+      expect(c.current, isNull);
+
+      land(work);
+      await played;
+
+      expect(player.loadedFilePath, fileOf(work).path);
+      expect(player.loadedUrl, isNull);
+      expect(player.playing, isTrue);
+      expect(c.current?.id, work.id);
+    });
+
+    test('Stream now, this once, under Download first: it streams at once '
+        'and fetches nothing', () async {
+      final c = make();
+      final work = await seedEpisode();
+      expect(await c.playsDownloadFirst(), isTrue);
+
+      await c.playWork(work, downloadFirst: false);
+
+      expect(player.loadedUrl, 'https://cast.test/1.mp3');
+      expect(fetched, isEmpty);
+    });
+
+    test('Download, then play, this once, under Stream: it fetches first '
+        'and plays the file', () async {
+      downloadFirst = false;
+      final c = make();
+      final work = await seedEpisode();
+      expect(await c.playsDownloadFirst(), isFalse);
+      expect(c.canDownloadFirst, isTrue);
+
+      final played = c.playWork(work, downloadFirst: true);
+      await pumpEventQueue();
+      expect(fetched, [work.id]);
+      expect(player.loadedUrl, isNull);
+
+      land(work);
+      await played;
+      expect(player.loadedFilePath, fileOf(work).path);
+    });
+
+    test('already downloaded: it plays at once and nothing is fetched',
+        () async {
+      final c = make();
+      final work = await seedEpisode();
+      fileOf(work).writeAsStringSync('bytes');
+
+      await c.playWork(work);
+
+      expect(player.loadedFilePath, fileOf(work).path);
+      expect(fetched, isEmpty);
+      expect(notices, isEmpty);
+    });
+
+    test('what was playing plays on while the next one downloads',
+        () async {
+      final c = make();
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      fileOf(first).writeAsStringSync('bytes');
+      await c.playWork(first);
+      player.log.clear();
+
+      final played = c.playWork(second);
+      await pumpEventQueue();
+      expect(c.current?.id, first.id);
+      expect(player.playing, isTrue);
+      expect(player.log, isNot(contains('pause')));
+
+      land(second);
+      await played;
+      expect(c.current?.id, second.id);
+      expect(player.loadedFilePath, fileOf(second).path);
+    });
+
+    test('a Play somewhere else meanwhile wins: the first does not start '
+        'when its download lands', () async {
+      final c = make();
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      fileOf(second).writeAsStringSync('bytes');
+
+      final pending = c.playWork(first);
+      await pumpEventQueue();
+      await c.playWork(second);
+      land(first);
+      await pending;
+
+      expect(c.current?.id, second.id);
+      expect(player.loadedFilePath, fileOf(second).path);
+    });
+
+    test('X meanwhile wins too: nothing starts under a closed bar',
+        () async {
+      final c = make();
+      final work = await seedEpisode();
+
+      final pending = c.playWork(work);
+      await pumpEventQueue();
+      await c.stop();
+      land(work);
+      await pending;
+
+      expect(c.current, isNull);
+      expect(player.loadedFilePath, isNull);
+    });
+
+    test('where it must wait for Wi-Fi, nothing plays and it says so',
+        () async {
+      mustWait = true;
+      final c = make();
+      final work = await seedEpisode();
+
+      await c.playWork(work);
+
+      expect(notices, [PlayNotice.waitingForWifi]);
+      expect(player.loadedUrl, isNull);
+      expect(player.loadedFilePath, isNull);
+      expect(c.current, isNull);
+    });
+
+    test('a download that fails says so and plays nothing', () async {
+      final c = make();
+      final work = await seedEpisode();
+
+      final played = c.playWork(work);
+      await pumpEventQueue();
+      landing.complete(FetchEnd.failed);
+      await played;
+
+      expect(notices, [PlayNotice.downloadingFirst, PlayNotice.downloadFailed]);
+      expect(c.current, isNull);
+    });
+
+    test('a download the listener paused plays nothing and says nothing '
+        'more', () async {
+      final c = make();
+      final work = await seedEpisode();
+
+      final played = c.playWork(work);
+      await pumpEventQueue();
+      landing.complete(FetchEnd.paused);
+      await played;
+
+      expect(notices, [PlayNotice.downloadingFirst]);
+      expect(c.current, isNull);
+    });
+
+    test('the queue moving on meanwhile does not call off the Play that '
+        'is downloading', () async {
+      final c = make();
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      final third = await seedEpisode(
+          title: 'Three', enclosure: 'https://cast.test/3.mp3');
+      fileOf(first).writeAsStringSync('bytes');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: third.id, nowMs: 1);
+      await c.playWork(first);
+
+      final pending = c.playWork(second);
+      await pumpEventQueue();
+      player.emitCompleted();
+      await pumpEventQueue();
+      expect(c.current?.id, third.id);
+
+      land(second);
+      await pending;
+      expect(c.current?.id, second.id);
+      expect(player.loadedFilePath, fileOf(second).path);
+    });
+
+    test('the queue moving on by itself streams, whatever the setting: '
+        'Download first is for a Play the listener presses', () async {
+      final c = make();
+      final first = await seedEpisode(title: 'One');
+      final second = await seedEpisode(
+          title: 'Two', enclosure: 'https://cast.test/2.mp3');
+      fileOf(first).writeAsStringSync('bytes');
+      await db.queueDao
+          .playLast(profileId: profileId, workId: second.id, nowMs: 1);
+      await c.playWork(first);
+
+      player.emitCompleted();
+      await pumpEventQueue();
+
+      expect(c.current?.id, second.id);
+      expect(player.loadedUrl, 'https://cast.test/2.mp3');
+      expect(fetched, isEmpty);
+    });
+  });
+
+  group('local file playback (Campaign 6)', () {
+    late Directory dir;
+    setUp(() => dir = Directory.systemTemp.createTempSync('trellis-local-play'));
+    tearDown(() => dir.deleteSync(recursive: true));
+
+    PlayerController withLocalFile(File Function(int, String) resolver) {
+      final c = PlayerController(
+          db: db,
+          profileId: profileId,
+          createPlayer: nextPlayer,
+          now: () => DateTime.fromMillisecondsSinceEpoch(clockMs),
+          localAudioFileFor: resolver);
+      addTearDown(c.dispose);
+      return c;
+    }
+
+    test('a downloaded episode plays from the local file, not the URL',
+        () async {
+      final local = File('${dir.path}/1.mp3')..writeAsStringSync('bytes');
+      final fromFile = withLocalFile((workId, url) => local);
+      final work = await seedEpisode();
+
+      await fromFile.playWork(work);
+
+      expect(player.loadedFilePath, local.path);
+      expect(player.loadedUrl, isNull);
+    });
+
+    test('an episode with no local file streams the URL exactly as before',
+        () async {
+      final missing = File('${dir.path}/never-downloaded.mp3');
+      final streamer = withLocalFile((workId, url) => missing);
+      final work = await seedEpisode();
+
+      await streamer.playWork(work);
+
+      expect(player.loadedUrl, 'https://cast.test/1.mp3');
+      expect(player.loadedFilePath, isNull);
+    });
+
+    test('per-feed speed override and resume-from-position hold exactly '
+        'the same when the source is a local file — the swap changes '
+        'nothing downstream of loading', () async {
+      final local = File('${dir.path}/1.mp3')..writeAsStringSync('bytes');
+      final fromFile = withLocalFile((workId, url) => local);
+      final work = await seedEpisode();
+      await db.feedsDao.updatePlaybackSettings(feedId, speedOverride: 1.75);
+      await db.feedsDao.savePlayerPosition(
+          profileId: profileId, workId: work.id, tMs: 42000);
+
+      await fromFile.playWork(work);
+
+      expect(player.loadedFilePath, local.path);
+      expect(player.lastSpeed, 1.75);
+      expect(player.log, contains('seek:42000'));
+    });
+
+    test('eviction composes: once the local file is gone, playback falls '
+        'back to streaming — "re-download" keeps meaning what it says',
+        () async {
+      final local = File('${dir.path}/1.mp3')..writeAsStringSync('bytes');
+      final fallsBack = withLocalFile((workId, url) => local);
+      final work = await seedEpisode();
+
+      // The file existed at plan time, then eviction (or any other cause)
+      // removed it before playback actually started.
+      local.deleteSync();
+      await fallsBack.playWork(work);
+
+      expect(player.loadedUrl, 'https://cast.test/1.mp3');
+      expect(player.loadedFilePath, isNull);
+    });
+  });
+
+  group('resume after restart (Campaign 9 Phase 2)', () {
+    // User: "when I pause or close the play bar it's hard to find what I
+    // was playing." A fresh PlayerController (createPlayer never called
+    // yet, same db) models a real app restart honestly — the old
+    // controller's in-memory `_current` is gone the same way it would be
+    // after a process kill; only what's on disk survives.
+    PlayerController freshController() {
+      final c = PlayerController(
+          db: db,
+          profileId: profileId,
+          createPlayer: () => FakeEpisodePlayer(),
+          now: () => DateTime.fromMillisecondsSinceEpoch(clockMs));
+      addTearDown(c.dispose);
+      return c;
+    }
+
+    test('playing a work records it as last-played', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      expect((await db.profilesDao.readerPrefs(profileId)).lastPlayedWorkId,
+          work.id);
+    });
+
+    test('a fresh controller with nothing ever played rehydrates to nothing',
+        () async {
+      final fresh = freshController();
+      await fresh.rehydrateLastPlayed();
+      expect(fresh.current, isNull);
+    });
+
+    test('rehydrateLastPlayed shows the work PAUSED at the saved position '
+        'without loading real audio — no autoplay, no eager network',
+        () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitPosition(const Duration(seconds: 90));
+      await controller.toggle(); // pause -> saveProgress persists tMs
+
+      final fresh = freshController();
+      await fresh.rehydrateLastPlayed();
+
+      expect(fresh.current?.id, work.id);
+      expect(fresh.playing, isFalse);
+      expect(fresh.rehydratedPositionMs, 90000);
+    });
+
+    test('a stale lastPlayedWorkId (the work was swept, the ordinary '
+        'ephemeron fate) clears itself and rehydrates to nothing', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await db.spineDao.deleteWork(work.id);
+
+      final fresh = freshController();
+      await fresh.rehydrateLastPlayed();
+
+      expect(fresh.current, isNull);
+      expect((await db.profilesDao.readerPrefs(profileId)).lastPlayedWorkId,
+          isNull,
+          reason: 'a dangling pref must not linger forever, re-tried on '
+              'every future rehydrate');
+    });
+
+    test('tapping play on a rehydrated-but-not-loaded work performs the '
+        'real load, from the saved position, then plays', () async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      player.emitPosition(const Duration(seconds: 90));
+      await controller.toggle();
+
+      final fresh = freshController();
+      await fresh.rehydrateLastPlayed();
+      await fresh.toggle();
+
+      expect(fresh.current?.id, work.id);
+      expect(fresh.playing, isTrue);
+      expect(fresh.rehydratedPositionMs, isNull,
+          reason: 'a live player has taken over — the snapshot caption '
+              'must not linger beside a real, moving slider');
+    });
+
+    test('rehydrating a work WITH alignments still offers the karaoke '
+        'door (hasAlignments) on the rehydrated bar', () async {
+      final work = await seedEpisode(withAlignments: true);
+      await controller.playWork(work);
+      await controller.toggle();
+
+      final fresh = freshController();
+      await fresh.rehydrateLastPlayed();
+
+      expect(fresh.hasAlignments, isTrue);
+    });
+  });
+
+  group('MiniPlayerBar', () {
+    // 1.5.9: the rarer doors live in the bar's ⋮ menu.
+    Future<void> openBarMenu(WidgetTester tester) async {
+      await tester.tap(find.byKey(const Key('player-menu')));
+      await tester.pumpAndSettle();
+    }
+
+    double progress(WidgetTester tester) => tester
+        .widget<LinearProgressIndicator>(
+            find.byKey(const Key('player-slider')))
+        .value!;
+
+    Future<void> pumpBar(WidgetTester tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: const SizedBox.expand(),
+          bottomNavigationBar: MiniPlayerBar(controller: controller),
+        ),
+      ));
+      await tester.pump();
+    }
+
+    testWidgets('hidden while nothing plays; appears with the episode title',
+        (tester) async {
+      await pumpBar(tester);
+      expect(find.byKey(const Key('mini-player')), findsNothing);
+
+      final work = await seedEpisode(title: 'Aurora season');
+      await controller.playWork(work);
+      await tester.pump();
+
+      expect(find.byKey(const Key('mini-player')), findsOneWidget);
+      expect(find.text('Aurora season'), findsOneWidget);
+    });
+
+    testWidgets('a rehydrated (not-yet-loaded) work shows a plain '
+        '"Paused at mm:ss" caption instead of a misleading full slider — '
+        'duration is genuinely unknown, so the progress line must not pin '
+        'near full (Campaign 9 Phase 2)', (tester) async {
+      final work = await seedEpisode(title: 'Aurora season');
+      await controller.playWork(work);
+      player.emitPosition(const Duration(minutes: 12, seconds: 34));
+      await controller.toggle(); // pause, saves tMs
+
+      final freshPlayer = FakeEpisodePlayer();
+      final fresh = PlayerController(
+          db: db,
+          profileId: profileId,
+          createPlayer: () => freshPlayer,
+          now: () => DateTime.fromMillisecondsSinceEpoch(clockMs));
+      addTearDown(fresh.dispose);
+      await fresh.rehydrateLastPlayed();
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: const SizedBox.expand(),
+          bottomNavigationBar: MiniPlayerBar(controller: fresh),
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.text('Aurora season'), findsOneWidget);
+      expect(find.text('Paused at 12:34'), findsOneWidget);
+      expect(progress(tester), 0,
+          reason: 'no live duration exists yet — showing any progress on '
+              'the line itself would misrepresent how far in this is');
+    });
+
+    testWidgets('a rehydrated work whose duration was learned on the last '
+        'play shows the progress at the saved position, not at the start',
+        (tester) async {
+      // User: "when the podcast is paused, the little circle doesn't
+      // represent where in the timeline it is."
+      final work = await seedEpisode(title: 'Aurora season');
+      await controller.playWork(work);
+      player.emitDuration(const Duration(minutes: 60));
+      player.emitPosition(const Duration(minutes: 12, seconds: 34));
+      await tester.pump();
+      await controller.toggle(); // pause, saves tMs
+
+      final fresh = PlayerController(
+          db: db,
+          profileId: profileId,
+          createPlayer: () => FakeEpisodePlayer(),
+          now: () => DateTime.fromMillisecondsSinceEpoch(clockMs));
+      addTearDown(fresh.dispose);
+      await fresh.rehydrateLastPlayed();
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: const SizedBox.expand(),
+          bottomNavigationBar: MiniPlayerBar(controller: fresh),
+        ),
+      ));
+      await tester.pump();
+
+      expect(progress(tester), closeTo(754000 / 3600000, 1e-9));
+      expect(find.text('Paused at 12:34'), findsOneWidget);
+    });
+
+    testWidgets('transport controls drive the seam', (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await pumpBar(tester);
+      player.emitDuration(const Duration(minutes: 10));
+      player.emitPosition(const Duration(minutes: 5));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('player-toggle')));
+      await tester.pump();
+      expect(player.playing, isFalse);
+
+      // Back 15 and Forward 30 are both on the bar (1.6.18, owner:
+      // "Unhide the forward 30 seconds button").
+      await tester.tap(find.byKey(const Key('player-back15')));
+      await tester.pumpAndSettle();
+      expect(player.log, contains('seek:${(5 * 60 - 15) * 1000}'));
+
+      await tester.tap(find.byKey(const Key('player-fwd30')));
+      await tester.pumpAndSettle();
+      expect(player.log, contains('seek:${(5 * 60 - 15 + 30) * 1000}'));
+
+      await tester.drag(
+          find.byKey(const Key('player-speed')), const Offset(0, -60));
+      await tester.pump();
+      expect(controller.speed, 1.2);
+      expect(find.text('1.2×'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('player-close')));
+      await tester.pump();
+      expect(find.byKey(const Key('mini-player')), findsNothing);
+    });
+
+    testWidgets('the progress line shows how far in, over the duration',
+        (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await pumpBar(tester);
+      player.emitDuration(const Duration(minutes: 10));
+      player.emitPosition(const Duration(minutes: 5));
+      await tester.pump();
+
+      expect(progress(tester), 0.5);
+    });
+
+    testWidgets(
+        'capture and captures-list doors are hidden without callbacks — '
+        'never a dead button', (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await pumpBar(tester);
+      await openBarMenu(tester);
+
+      expect(find.byKey(const Key('player-capture')), findsNothing);
+      expect(find.byKey(const Key('open-captures')), findsNothing);
+    });
+
+    testWidgets('the capture door calls onCapture', (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      var captured = false;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar: MiniPlayerBar(
+              controller: controller, onCapture: () => captured = true),
+        ),
+      ));
+      await tester.pump();
+
+      await openBarMenu(tester);
+      expect(find.byKey(const Key('player-capture')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('player-capture')));
+      await tester.pumpAndSettle();
+      expect(captured, isTrue);
+    });
+
+    testWidgets('the captures-list door calls onOpenCaptures', (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      var opened = false;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar: MiniPlayerBar(
+              controller: controller, onOpenCaptures: () => opened = true),
+        ),
+      ));
+      await tester.pump();
+
+      await openBarMenu(tester);
+      expect(find.byKey(const Key('open-captures')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('open-captures')));
+      await tester.pumpAndSettle();
+      expect(opened, isTrue);
+    });
+
+    testWidgets(
+        'the two bookmark doors carry visibly different icons — capture vs '
+        'the captures list', (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          bottomNavigationBar: MiniPlayerBar(
+              controller: controller, onCapture: () {}, onOpenCaptures: () {}),
+        ),
+      ));
+      await tester.pump();
+      await openBarMenu(tester);
+
+      Icon iconOf(String key) => tester.widget<Icon>(find.descendant(
+          of: find.byKey(Key(key)), matching: find.byType(Icon)));
+      final captureIcon = iconOf('player-capture');
+      final capturesListIcon = iconOf('open-captures');
+      expect(captureIcon.icon, Icons.bookmark_add_outlined);
+      expect(capturesListIcon.icon, Icons.collections_bookmark_outlined,
+          reason: 'the captures-list door must read as a LIST, distinct '
+              'from the single-capture bookmark');
+    });
+
+    testWidgets(
+        'the sleep timer sheet: picking a duration arms it and closes',
+        (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await pumpBar(tester);
+
+      await openBarMenu(tester);
+      await tester.tap(find.byKey(const Key('open-sleep-timer')));
+      await tester.pumpAndSettle();
+      expect(find.text('Sleep timer'), findsOneWidget);
+      expect(find.byKey(const Key('sleep-timer-30')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('sleep-timer-30')));
+      await tester.pumpAndSettle();
+
+      expect(controller.sleepTimerMode, SleepTimerMode.duration);
+      expect(controller.sleepTimerRemaining, const Duration(minutes: 30));
+      expect(find.text('Sleep timer'), findsNothing,
+          reason: 'the sheet closes once a choice is made');
+    });
+
+    testWidgets('the sleep timer sheet: "end of episode" arms that mode',
+        (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await pumpBar(tester);
+
+      await openBarMenu(tester);
+      await tester.tap(find.byKey(const Key('open-sleep-timer')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('sleep-timer-end-of-episode')));
+      await tester.pumpAndSettle();
+
+      expect(controller.sleepTimerMode, SleepTimerMode.endOfEpisode);
+    });
+
+    testWidgets(
+        'reopening the sheet while a timer is active shows remaining time '
+        'and cancels it', (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      controller.startSleepTimer(duration: const Duration(minutes: 30));
+      await pumpBar(tester);
+
+      await openBarMenu(tester);
+      await tester.tap(find.byKey(const Key('open-sleep-timer')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('30:00'), findsOneWidget,
+          reason: 'the same sheet shows what was set');
+
+      await tester.tap(find.byKey(const Key('sleep-timer-cancel')));
+      await tester.pumpAndSettle();
+
+      expect(controller.sleepTimerMode, isNull);
+    });
+
+    testWidgets('the sleep timer sheet: a custom duration', (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await pumpBar(tester);
+
+      await openBarMenu(tester);
+      await tester.tap(find.byKey(const Key('open-sleep-timer')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('sleep-timer-custom')));
+      await tester.pumpAndSettle();
+      // A stepper, not a typed box (owner, 12 Nov): 20 to start, 5 a step.
+      expect(find.byType(TextField), findsNothing);
+      expect(find.text('20 min'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('sleep-timer-custom-more')));
+      await tester.tap(find.byKey(const Key('sleep-timer-custom-more')));
+      await tester.tap(find.byKey(const Key('sleep-timer-custom-less')));
+      await tester.pump();
+      expect(find.text('25 min'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('sleep-timer-custom-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(controller.sleepTimerMode, SleepTimerMode.duration);
+      expect(controller.sleepTimerRemaining, const Duration(minutes: 25));
+    });
+
+    testWidgets('the queue button opens whatever the shell wires it to',
+        (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      var opened = false;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: const SizedBox.expand(),
+          bottomNavigationBar: MiniPlayerBar(
+              controller: controller, onOpenQueue: () => opened = true),
+        ),
+      ));
+      await tester.pump();
+
+      await openBarMenu(tester);
+      await tester.tap(find.byKey(const Key('open-queue')));
+      await tester.pumpAndSettle();
+
+      expect(opened, isTrue);
+    });
+
+    testWidgets('no onOpenQueue given: the button simply is not offered',
+        (tester) async {
+      final work = await seedEpisode();
+      await controller.playWork(work);
+      await pumpBar(tester);
+      await openBarMenu(tester);
+
+      expect(find.byKey(const Key('open-queue')), findsNothing);
+    });
+  });
+
+  group('MediaItem tagging (Campaign 9 Phase 2e, ADR-0015 Decision 3)', () {
+    test('playWork tags the loaded audio with the work id/title and the '
+        "feed's title as album", () async {
+      final namedFeedId = await db.feedsDao.insertFeed(
+        profileId: profileId,
+        url: 'https://cast.test/named-feed',
+        title: 'The Daily Something Podcast',
+      );
+      final work = await seedEpisode(
+          title: 'Episode Nine', feedIdOverride: namedFeedId);
+
+      await controller.playWork(work);
+
+      final tag = player.loadedMediaItem;
+      expect(tag, isNotNull);
+      expect(tag!.id, work.id.toString());
+      expect(tag.title, 'Episode Nine');
+      expect(tag.album, 'The Daily Something Podcast');
+    });
+
+    test('no artworkFileFor wired (the ordinary case, and the whole web '
+        'tier): the tag still carries id/title, artUri stays null',
+        () async {
+      final work = await seedEpisode();
+
+      await controller.playWork(work);
+
+      expect(player.loadedMediaItem?.artUri, isNull);
+    });
+
+    test('an artwork file that exists on disk becomes the tag artUri',
+        () async {
+      final dir =
+          Directory.systemTemp.createTempSync('trellis-player-artwork');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final art = File('${dir.path}/$feedId.img')
+        ..writeAsBytesSync([1, 2, 3]);
+      final withArt = PlayerController(
+        db: db,
+        profileId: profileId,
+        createPlayer: nextPlayer,
+        now: () => DateTime.fromMillisecondsSinceEpoch(nowMs),
+        artworkFileFor: (id) => File('${dir.path}/$id.img'),
+      );
+      addTearDown(withArt.dispose);
+      final work = await seedEpisode();
+
+      await withArt.playWork(work);
+
+      expect(player.loadedMediaItem?.artUri, Uri.file(art.path));
+    });
+
+    test('artworkFileFor wired but nothing was ever downloaded: the '
+        'deterministic path is not proof, so artUri stays null', () async {
+      final dir = Directory.systemTemp
+          .createTempSync('trellis-player-artwork-missing');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final withArt = PlayerController(
+        db: db,
+        profileId: profileId,
+        createPlayer: nextPlayer,
+        now: () => DateTime.fromMillisecondsSinceEpoch(nowMs),
+        artworkFileFor: (id) => File('${dir.path}/$id.img'),
+      );
+      addTearDown(withArt.dispose);
+      final work = await seedEpisode();
+
+      await withArt.playWork(work);
+
+      expect(player.loadedMediaItem?.artUri, isNull);
+    });
+  });
+}

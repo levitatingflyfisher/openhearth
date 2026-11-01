@@ -1,0 +1,235 @@
+# ADR-0016: Episodes you can tell apart, and a home for each subscription
+
+- Status: Accepted
+- Date: 2026-10-21
+
+## Context
+
+Measured against AntennaPod, the app the user is replacing, the Inbox reads as
+"an endless stream of blah". Every row carries the same four things (title,
+show, date, play), so nothing separates the episode you finished from the one
+you are halfway through or the one you have never touched. The feed page is
+worse: titles and dates only, no way to play, on purpose (ADR-0003 law 1 kept
+"the one ordering" in the river).
+
+The user's real sessions, in their words:
+
+1. Check what is new across everything and add things to the queue.
+2. Go back into one podcast and binge it.
+3. Clean up what they didn't listen to.
+4. Find the episode they heard a month ago, to share it.
+
+They rarely touch granular per-feed controls. They don't use tags, but would
+group by **where the content came from** once books, blogs and podcasts mix,
+even though every item can be read or heard either way.
+
+## Decision
+
+### 1. A row that says what state the episode is in
+
+Every episode row (Inbox, podcast page, history, search) shows:
+
+- **Played** rows fade (reduced opacity, still legible at large text) so the
+  unplayed ones stand out without a badge.
+- **In progress**: a thin progress bar and time left ("23 min left").
+- **Length** on every row that knows it (`Episodes.durationMs`, or the
+  player's measured duration once played).
+- Small, labelled markers, never colour alone: new, downloaded, in Up Next,
+  transcribed, video.
+- Per-episode artwork when the feed provides it, falling back to the show's.
+
+"Played" needs a real fact, not a guess from position: add
+`Episodes.finishedAtMs`, set when playback reaches the end (or the last
+~30 s) or when the user marks it played, cleared by "mark unplayed".
+
+### 2. The podcast page is a place you can listen from
+
+The feed detail screen becomes the podcast page:
+
+- Plays, downloads and queues from its rows.
+- Sort newest-first (default) or oldest-first, remembered per feed.
+- "Play from here" and "Add unplayed to Up Next".
+- Downloads, auto-download and the existing archive action live here; the
+  granular settings (speed, keep N, rules) sit behind one "Podcast settings"
+  button.
+
+This does not break ADR-0003 law 1. The law forbids *ranking*; the Inbox
+stays reverse-chronological, and a podcast page sorted by date (either way,
+by the user's choice) is still chronological. Up Next only ever holds what the
+user put there. Playback may continue to the next item *in Up Next*; it never
+fills Up Next itself, so this is not autoplay (VISION's scope test).
+
+### 3. Subscriptions, shelved by origin
+
+A Subscriptions page lists every followed source, grouped automatically into
+shelves by origin (Podcasts, Blogs and newsletters, Books, Video), no manual
+tags. Each row shows artwork, the unplayed count and the failure reason
+(red) when one exists. Origin is a property of the source, recorded at intake;
+it never limits how an item is consumed.
+
+### 4. History and search
+
+A listening/reading history (most recent first) and one search box over
+episode titles, show names and, where they exist, transcripts. Transcript
+search is the thing AntennaPod cannot do.
+
+### 5. Clean-up
+
+Multi-select on any episode list (mark played, let pass, remove download),
+plus "Mark everything older than this as played". Nothing nags about what was
+left unplayed.
+
+## Order of work
+
+1. The row (section 1) and the podcast page (section 2).
+2. Subscriptions with shelves.
+3. History and search.
+4. Clean-up.
+
+Each step ships on its own and is tested; the hidden-screen fixes (a full Now
+Playing screen, one settings home, an always-visible Follow) are a separate
+piece of work.
+
+## Consequences
+
+- One schema change (`finishedAtMs`), plus a per-feed sort preference.
+- The feed detail screen's "not a second river" note is retired; its
+  RFC 5005 "Fetch older episodes" action stays.
+- AntennaPod (GPL) was studied for what its rows show, never for code.
+
+## Notes from building step 2
+
+- Origin is learned from each fresh parse: audio on any item makes a
+  podcast, none makes a blog. An empty listing leaves it unchanged, and a
+  feed with nothing stored yet (an OPML import never reached) stays on
+  Podcasts until it answers.
+- The Books shelf holds `kind == 'book'` works the Library shows (EPUB and
+  Gutenberg). Audiobooks stay in the Library for now; whether they belong
+  on this shelf is open.
+- There is no Video shelf: the parser keeps only audio enclosures, and
+  video support is undecided.
+- Blog rows show no count. "Unplayed" means audio not yet finished, and
+  articles have none; an unread count for them would be a separate ruling.
+
+## Notes from building step 3
+
+- History means actually listened to or read (coordinator ruling): a
+  listening place past the start, a reading place past the first word,
+  or a finish by ear (the work's finished day, which only playback
+  reaching the end stamps). "Mark played" alone does not count, so
+  step 4's bulk clean-up won't flood history, and neither does "seen"
+  (`readAtMs`), which opening a row and Let it pass both set. No new
+  column: those timestamps already exist.
+- Search results and history are ordered by time (publish date, or the
+  history timestamp), never by a relevance score. A ranked list is what
+  ADR-0003 law 1 keeps out, and the item the user is after is found by
+  when they heard it.
+- The index is two FTS5 tables kept in step by triggers: one row per
+  work with its title and its show's name side by side, so every word
+  of "serial episode 5" may land in either; and transcript sentences. Only sentences with an alignment
+  are indexed, so a book's or article's body is not searched; the brief
+  asked for transcripts, and indexing whole books would double their
+  storage. FTS5 is in the bundled native SQLite and in the shipped
+  `sqlite3.wasm`; a build without it opens normally and searches with
+  LIKE.
+- A transcript hit with audio plays from its sentence through the
+  player's existing projection (`listenFrom`). Without audio, the reader
+  opens on the sentence and leaves the saved place alone until the cursor
+  moves; after that the hit is spent, and a reload goes to the saved
+  place. Audiobooks are never transcribed today, so they have no
+  transcript hits to seek; when they are, a hit should seek through the
+  file-aware `playAudiobookAt`.
+- Share hands the title, show and enclosure link to the platform sheet on
+  Android. On the web tier, or when the sheet fails, it copies the same
+  text and says so.
+- Search is a worded field at the top of the Inbox and Subscriptions
+  lists, not a bar action. At 360 dp and 1.3x text a Search word on the
+  Inbox bar folded the theme toggle's visible "Auto" into its tooltip,
+  and the bar ruling forbids trading one visible label for another.
+  History sits in the Inbox's More menu and is search's empty state.
+
+## Notes from building step 4
+
+- Selection lives on every list built from the shared row: the Inbox,
+  the podcast page, History (its own screen and search's empty state)
+  and search results. Long-press a row, or use Select in the bar's More
+  menu, which needs no long-press. While selecting, a tap toggles, the
+  row shows a checkbox in place of play and its menu, the Inbox's swipes
+  are off, and Back or Escape leave selection before the screen. Books
+  and notes in History and search are not selectable: the actions are
+  about episodes.
+- The bar shows Select all and Mark played; Mark unplayed, Let it pass,
+  Add to Up Next and Remove download sit in its worded More menu. Any
+  reload or filter change drops selected rows no longer on screen, so
+  the count and the actions cover only visible rows, and new search
+  words clear the selection.
+- Each bulk action is one transaction (`lib/db/bulk_episodes.dart`), IN
+  lists chunked as in ADR-0017. Undo goes through `OhUndoController`, so
+  it lasts until the listener moves on, and restores the exact prior
+  state. Mark played and Let it pass fill only blank stamps, and Undo
+  blanks exactly those; unlike the single Let it pass, a bulk one keeps
+  an earlier seen day. Mark unplayed copies the finished stamps and
+  every saved place before clearing them, and Undo puts them back. A
+  half-heard episode that was never finished counts as changed, since
+  clearing its place takes it out of History. Undo is offered whenever
+  anything was written, even when the count of newly played rows is 0.
+  Add to Up Next appends what was not queued, oldest to newest by
+  publish date whatever the list's sort (coordinator ruling: binge
+  order), and Undo removes only that. A write that fails rolls back
+  whole, says so, and keeps the selection for another try.
+- Remove download deletes the files at once and has no Undo; its message
+  says the episodes can be downloaded again. Keeping files until the
+  offer lapsed would mean a second "downloaded but pending delete"
+  state for every reader of the disk. The episode playing now keeps its
+  file, as does any episode with a transcribe or DSP job, running or
+  paused, since those read it. A download still under way is stopped
+  and worded as stopped, not removed. The message says what happened
+  to each; the row is not marked archived: that dims it, and removing a
+  file says nothing about listening.
+- "Mark everything older as played" sits in an audio row's menu. On the
+  podcast page older means published earlier in that feed, whatever the
+  sort; a tie is not older. On the Inbox it is the same rule over the
+  rows the current filter shows, so a tie the list happens to place
+  below is not swept up. The Inbox breaks publish-time ties by id,
+  newest first, so the order holds across reloads. Only unplayed audio counts, since articles have
+  no played state, and the item is absent when that count is zero. It
+  asks first with the count ("Mark 214 older episodes as played?").
+- Bulk marking never adds to History, per step 3's ruling: it stamps
+  `finishedAtMs` but never the work's finished day. Nothing ranks,
+  nothing fills Up Next unasked, and the bar reports only what the
+  listener just did.
+
+## Update (1.5.4): the search index
+
+The index section above describes 1.5.3. As of 1.5.4 (schema v29):
+
+- **Three FTS5 tables**, all `tokenize = 'porter unicode61
+  remove_diacritics 2', prefix = '2 3'`, so word endings and accents
+  don't matter and a part-typed word matches:
+  - `items_fts(title, show, notes)`: one row per work. `notes` holds the
+    episode's full show notes (`work_notes.plain`); until those arrive,
+    and for a feed's text items always, it holds the item's body
+    segments (a post's text, an episode's short description). A book's
+    body is still not indexed.
+  - `segments_fts(body)`: transcript sentences (segments with an
+    alignment), as before.
+  - `feeds_fts(title)`: followed shows, so a show with no items is found
+    and its name matches as every other word does.
+- Triggers keep all three in step, including a post's text when its
+  segments change and notes when they change. The show-name trigger
+  fires only on a real rename.
+- Every word of a query is a prefix; a contraction ("it's") is matched
+  as the phrase the tokenizer stores. User input is always quoted.
+- Results come in sections, each newest first (ADR-0003, amended): Shows,
+  In titles (title or show name), In the text (`notes`, or words split
+  between it and the title), Said in. A work is listed once across the
+  first three; Said in lists every matching sentence.
+- **The v29 hop builds the tables and triggers empty.** `SearchBackfill`
+  fills them after launch, once the app may write (ADR-0018), 500 works
+  per transaction, saving its place with each batch so a kill resumes.
+  Until it finishes, search answers by LIKE and the search screen says
+  "Updating search… N%" (or that the update stopped, and will try again
+  at the next launch). A new install and a backup restore index in full.
+- Searches run on the app's reader connection (`readPool: 1`), so they
+  never queue behind a write transaction.
+

@@ -1,0 +1,166 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:openhearth_design/openhearth_design.dart';
+import 'package:flutter/services.dart' show rootBundle;
+
+import '../../db/database.dart';
+
+/// The bundled example course. It is offered as an example only, never
+/// as the reader's own: nothing here runs at boot, every import below sits
+/// behind the user's tap (ADR-0003: the user's hand does the importing),
+/// and the list marks it as an example by [exampleCourseId]. It stays in
+/// the bundle because it is small and shows what a course is with no
+/// network; the owner's worry was it being installed as if it were his.
+const String exampleCourseAsset = 'assets/courses/kalman.ohcourse';
+
+/// The example course's own id, inside [exampleCourseAsset].
+const String exampleCourseId = 'kalman-filters';
+
+/// Validates [raw] with study_core's strict parser and stores it (the parser
+/// law: a file that doesn't parse leaves zero rows). Returns the course row
+/// id; throws [FormatException] with a path-qualified message otherwise.
+Future<int> importCourseText(
+        {required AppDatabase db, required int profileId, required String raw}) =>
+    db.studyDao.importCourse(
+        profileId: profileId,
+        raw: raw,
+        nowMs: DateTime.now().millisecondsSinceEpoch);
+
+/// Imports the bundled example course: called from a button, never boot.
+Future<int> importExampleCourse(
+        {required AppDatabase db, required int profileId}) async =>
+    importCourseText(
+        db: db,
+        profileId: profileId,
+        raw: await rootBundle.loadString(exampleCourseAsset));
+
+/// The thin file_picker wrapper: pick one `.ohcourse` (or `.json`) file and
+/// delegate to [importCourseText]. Returns null when the picker is
+/// dismissed; propagates the parser's [FormatException] for a calm surface.
+Future<int?> pickAndImportCourse(
+    {required AppDatabase db, required int profileId}) async {
+  final result = await FilePicker.platform.pickFiles(
+    type: FileType.custom,
+    allowedExtensions: ['ohcourse', 'json'],
+    withData: true,
+  );
+  final file = result?.files.firstOrNull;
+  if (file == null) return null;
+  final bytes = file.bytes ?? await File(file.path!).readAsBytes();
+  return importCourseText(
+      db: db, profileId: profileId, raw: utf8.decode(bytes));
+}
+
+/// Paste-a-course dialog (the donor flow kept — fixes the Trellis jank of
+/// paste being the ONLY road in, without dropping it). The strict parser's
+/// error is shown inline, calmly; the dialog never half-imports. Returns the
+/// imported course row id, or null on cancel.
+Future<int?> showCoursePasteDialog(BuildContext context,
+    {required AppDatabase db, required int profileId}) {
+  return showDialog<int>(
+    context: context,
+    builder: (ctx) => _PasteCourseDialog(db: db, profileId: profileId),
+  );
+}
+
+class _PasteCourseDialog extends StatefulWidget {
+  final AppDatabase db;
+  final int profileId;
+  const _PasteCourseDialog({required this.db, required this.profileId});
+
+  @override
+  State<_PasteCourseDialog> createState() => _PasteCourseDialogState();
+}
+
+class _PasteCourseDialogState extends State<_PasteCourseDialog> {
+  // Owned by the State so it outlives the route's exit animation — disposing
+  // it the moment showDialog returned crashed the still-animating TextField.
+  final _controller = TextEditingController();
+  String? _error;
+  bool _showDetails = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _import() async {
+    try {
+      final id = await importCourseText(
+          db: widget.db, profileId: widget.profileId, raw: _controller.text);
+      if (!mounted) return;
+      Navigator.pop(context, id);
+    } on FormatException catch (e) {
+      setState(() {
+        _error = e.message;
+        _showDetails = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Paste a course'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('A .ohcourse file is JSON. Paste its text here.'),
+            const SizedBox(height: 8),
+            TextField(
+              key: const Key('course-json'),
+              controller: _controller,
+              minLines: 6,
+              maxLines: 12,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                // JSON syntax, not prose: straight quotes, or the hint would teach
+                // course authors JSON that does not parse.
+                hintText: '{ "schemaVersion": "1.0", … }', // copy-typography: code
+              ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              // Urgency is colour + icon + word, never colour alone; the
+              // strict parser's own message (JSON keys, for course
+              // authors) waits behind Details.
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.error_outline,
+                      size: 20, color: Theme.of(context).colorScheme.error),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text("That text isn’t a course Trellis can read.",
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error)),
+                  ),
+                ],
+              ),
+              TextButton(
+                onPressed: () => setState(() => _showDetails = !_showDetails),
+                child: Text(_showDetails ? 'Hide details' : 'Details'),
+              ),
+              if (_showDetails)
+                SelectableText(_error!,
+                    style: OhTypography.code(
+                        color: Theme.of(context).colorScheme.onSurface)),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context, null),
+            child: const Text('Cancel')),
+        FilledButton(onPressed: _import, child: const Text('Import')),
+      ],
+    );
+  }
+}

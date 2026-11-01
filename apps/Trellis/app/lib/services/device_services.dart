@@ -1,0 +1,773 @@
+/// The P3 device stack, bundled for injection: where model/audio/PCM files
+/// live, which download/decode/transcribe implementations run, and how the
+/// whisper engine is named for the executor's isolate.
+///
+/// `DeviceServices.real` wires the platform truth (domovoi engine over dio,
+/// ffmpeg on Android, the isolate executor, the Android foreground gate).
+/// Tests build one from fakes — no test ever touches a socket, a platform
+/// channel, or an isolate it didn't ask for.
+library;
+
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:crypto/crypto.dart';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:ml_runtime/ml_runtime.dart';
+import 'package:stardict_core/stardict_core.dart';
+import 'package:whisper_ffi/whisper_ffi.dart';
+
+import '../app_version.dart';
+import '../features/backup/backup_custody.dart';
+import '../features/models/model_store.dart';
+import '../features/reader/speech/phone_voice.dart';
+import '../features/reader/speech/speech_engine.dart';
+import '../features/reader/speech/downloaded_voices.dart';
+import '../features/reader/speech/kokoro/kokoro_engine.dart';
+import '../features/reader/speech/kokoro/kokoro_model.dart';
+import '../features/reader/speech/piper/piper_engine.dart';
+import '../features/reader/speech/piper/piper_model.dart';
+import '../features/reader/speech/pocket/pocket_engine.dart';
+import '../features/reader/speech/pocket/pocket_model.dart';
+import '../features/reader/speech/pocket/pocket_text.dart';
+import '../features/reader/speech/speech_temp_files.dart';
+import '../features/dsp/dsp_encoder.dart';
+import '../features/dsp/dsp_ffmpeg_encoder.dart';
+import '../features/brain/brain_store.dart';
+import '../features/reader/translation/marian_engine.dart';
+import '../features/reader/translation/translation_service.dart';
+import '../features/reader/translation/translation_route.dart'
+    show baseLanguage;
+import '../features/storage/recently_deleted.dart';
+import '../features/transcribe/audio_fetcher.dart';
+import '../features/transcribe/decoder.dart';
+import '../features/transcribe/ffmpeg_decoder.dart';
+import '../features/transcribe/foreground_gate.dart';
+import '../features/transcribe/native_abi.dart';
+import '../features/transcribe/transcribe_executor.dart';
+import '../features/transcribe/whisper_library.dart';
+
+/// Reads text aloud — the seam over the platform TTS engine, so speak mode
+/// stays testable off-device: tests inject a fake whose utterances complete
+/// on fake-time beats, and no widget test ever touches the TTS channel.
+///
+/// [speak]'s future completes when the utterance FINISHES (or is stopped) —
+/// the reader's speak loop paces itself on that completion, segment by
+/// segment (ADR-0002: the cursor advances with speech).
+abstract interface class TtsSpeaker {
+  /// [voice], when given, is the installed voice to read with (one the
+  /// listener picked for [lang]); otherwise the engine's default voice
+  /// for [lang]. Throws [TtsNoVoiceException] when the engine has no
+  /// voice for [lang] rather than reading it with another language's.
+  Future<void> speak(String text, {String? lang, SystemVoice? voice});
+  Future<void> stop();
+  Future<void> setRate(double r);
+
+  /// The voices installed on this device, or null when the platform
+  /// can't list them (then only [speak]'s own refusal tells).
+  Future<List<SystemVoice>?> voices();
+
+  /// Opens Android's text-to-speech settings, where a voice is added or
+  /// downloaded. False where there is no such page (the web, tests).
+  Future<bool> openSettings();
+}
+
+/// One installed platform voice, as the TTS engine names it.
+class SystemVoice {
+  /// The engine's own name for the voice (Android: "ru-ru-x-ruf-local").
+  final String name;
+
+  /// Its BCP-47 locale ("ru-RU").
+  final String locale;
+
+  /// Speaks only while online (Android's network voices).
+  final bool needsInternet;
+
+  const SystemVoice(
+      {required this.name, required this.locale, this.needsInternet = false});
+
+  /// The bare language ("ru"), the tag the reader speaks a sentence in.
+  String get lang => baseLanguage(locale) ?? '';
+
+  @override
+  bool operator ==(Object other) =>
+      other is SystemVoice && other.name == name && other.locale == locale;
+
+  @override
+  int get hashCode => Object.hash(name, locale);
+}
+
+/// The engine has no voice for [lang]: reading on would mean another
+/// language's voice reading it, which is never wanted.
+class TtsNoVoiceException implements Exception {
+  final String lang;
+  const TtsNoVoiceException(this.lang);
+  @override
+  String toString() => 'No voice for “$lang” is installed.';
+}
+
+/// The engine failed the utterance (Android's onError: a network voice
+/// offline or timed out, the engine taken by another app).
+class TtsSpeakException implements Exception {
+  final String message;
+  const TtsSpeakException(this.message);
+  @override
+  String toString() => 'The voice couldn’t play: $message';
+}
+
+/// The platform truth: flutter_tts with utterance-completion awaited, so
+/// [speak] resolves when the engine is done, matching the seam contract.
+/// Construction is cheap (a MethodChannel handle); nothing reaches the
+/// platform until the first call.
+///
+/// Chrome's speechSynthesis has a well-known >15s stall bug; the ADR-0006
+/// research plan called for a periodic pause()/resume() keep-alive tick
+/// here. Verified against the pinned flutter_tts (4.2.5, pubspec.lock):
+/// its own web implementation (`flutter_tts_web.dart`) ALREADY runs this
+/// exact workaround internally — a `Timer.periodic(Duration(seconds: 14))`
+/// calling `synth.pause(); synth.resume();` for the duration of any
+/// utterance spoken with a non-local voice. Adding a second one here would
+/// duplicate — and could race — the plugin's own timer, which the fleet's
+/// "no second copy" law rules out. The residual gap (a LOCAL voice, which
+/// the plugin's guard skips) is closed by ADR-0006's sentence-level speak
+/// loop instead: a single sentence essentially never approaches the 14s
+/// threshold that only matters for an un-mitigated long utterance, so
+/// there is nothing left here for this class to do.
+class FlutterTtsSpeaker implements TtsSpeaker {
+  FlutterTtsSpeaker(
+      {bool? waitForVoices,
+      this.voicePoll = const Duration(milliseconds: 250),
+      this.voicePolls = 4})
+      : waitForVoices = waitForVoices ?? kIsWeb;
+
+  /// Whether an empty voice list is asked again before it is believed: a
+  /// browser's speechSynthesis lists nothing until it has loaded its
+  /// voices (Chrome: until `voiceschanged`), and the web's setLanguage
+  /// answers 1 for any language, so an empty list taken at its word would
+  /// refuse every language, and no list at all would let an English voice
+  /// read Russian. Off on a phone, whose engine answers once and truly.
+  final bool waitForVoices;
+
+  /// How long between asks, and how many more (about a second in all).
+  final Duration voicePoll;
+  final int voicePolls;
+
+  FlutterTts? _tts;
+
+  /// The utterance being spoken: flutter_tts 4.2.5 answers a speak only on
+  /// onDone or stop (Android) and drops its own completer on an error
+  /// (web), so an engine error would leave [speak] waiting forever. The
+  /// error handler ends it here instead.
+  Completer<void>? _utterance;
+
+  Future<FlutterTts> _engine() async {
+    if (_tts != null) return _tts!;
+    final tts = FlutterTts();
+    tts.setErrorHandler((message) {
+      final c = _utterance;
+      if (c != null && !c.isCompleted) {
+        c.completeError(TtsSpeakException('$message'));
+      }
+    });
+    await tts.awaitSpeakCompletion(true);
+    return _tts = tts;
+  }
+
+  @override
+  Future<void> speak(String text, {String? lang, SystemVoice? voice}) async {
+    final tts = await _engine();
+    // Set before every sentence, never remembered: an engine that
+    // reconnects (another app took it, its service restarted) is back on
+    // its default language, and a remembered "already Russian" would let
+    // its English voice read on. A picked voice that has since been
+    // removed falls back to the language's default voice; only 1 is a
+    // yes (the web answers null whether or not it found the voice).
+    final picked = voice != null &&
+        await tts.setVoice({'name': voice.name, 'locale': voice.locale}) == 1;
+    if (!picked && lang != null) {
+      // Android answers 0 when it has no voice for the language and
+      // would read on with the one it has (an English voice spelling
+      // out Russian): refuse instead.
+      if (await tts.setLanguage(lang) == 0) throw TtsNoVoiceException(lang);
+    }
+    final c = _utterance = Completer<void>();
+    tts.speak(text).then((_) {
+      if (!c.isCompleted) c.complete();
+    }, onError: (Object e, StackTrace s) {
+      if (!c.isCompleted) c.completeError(e, s);
+    });
+    try {
+      await c.future;
+    } finally {
+      if (identical(_utterance, c)) _utterance = null;
+    }
+  }
+
+  @override
+  Future<List<SystemVoice>?> voices() async {
+    try {
+      final tts = await _engine();
+      var raw = await tts.getVoices;
+      for (var i = 0;
+          waitForVoices && raw is List && raw.isEmpty && i < voicePolls;
+          i++) {
+        await Future<void>.delayed(voicePoll);
+        raw = await tts.getVoices;
+      }
+      if (raw is! List) return null;
+      return [
+        for (final v in raw)
+          if (v is Map &&
+              v['name'] is String &&
+              v['locale'] is String &&
+              // A voice listed but not downloaded can't speak yet.
+              !'${v['features'] ?? ''}'.split('\t').contains('notInstalled'))
+            SystemVoice(
+                name: v['name'] as String,
+                locale: v['locale'] as String,
+                needsInternet: '${v['network_required']}' == '1'),
+      ];
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Future<void> stop() async {
+    // A stopped utterance has completed (the seam's contract): end it
+    // here, so the web, which reports a cancel as an error and never
+    // answers the speak, can't leave it waiting or fail it.
+    final c = _utterance;
+    if (c != null && !c.isCompleted) c.complete();
+    await (await _engine()).stop();
+  }
+
+  @override
+  Future<void> setRate(double r) async => (await _engine()).setSpeechRate(r);
+
+  /// Through the app's own channel (PhoneVoice.kt), the same door the
+  /// learning-language list opens.
+  @override
+  Future<bool> openSettings() async =>
+      !kIsWeb && await MethodChannelPhoneSpeechSaver().openSettings();
+}
+
+/// Silence for surfaces that never speak (detached services, plain widget
+/// tests): utterances complete immediately, nothing touches a channel.
+class NoopTtsSpeaker implements TtsSpeaker {
+  @override
+  Future<void> speak(String text, {String? lang, SystemVoice? voice}) async {}
+  @override
+  Future<List<SystemVoice>?> voices() async => null;
+  @override
+  Future<bool> openSettings() async => false;
+  @override
+  Future<void> stop() async {}
+  @override
+  Future<void> setRate(double r) async {}
+}
+
+/// The web tier's fetch-routing decision (the Skein household daemon).
+/// Resolved once, at boot, by a same-origin probe (bootstrap_web.dart's
+/// `probeWebFetchLane`) — never re-probed, so it can't flap mid-session.
+/// Native tiers never probe and stay [direct] forever: Skein only exists
+/// to solve the browser's CORS wall, and native apps fetch directly.
+enum WebFetchLane {
+  /// The plain browser fetch — most cross-site reads get refused by the
+  /// target site (no proxy, by design).
+  direct,
+
+  /// A Skein daemon answered `/api/health` on this very origin: the page
+  /// and the fetcher share one origin now, so CORS dissolves.
+  skein,
+}
+
+class DeviceServices {
+  final Directory supportDir;
+  final ModelStore modelStore;
+  final ModelRegistry registry;
+  final Decoder decoder;
+  final AudioFetcher audioFetcher;
+  final TranscribeExecutor executor;
+  final JobForegroundGate foregroundGate;
+  final DeviceTier tier;
+
+  /// The offline DSP preprocess's platform boundary (Campaign 6). Optional
+  /// with an honest-refusal default ([UnavailableDspEncoder]) so every
+  /// existing construction site stays additive — only `.real()`'s Android
+  /// branch and tests that actually exercise DSP ever pass a real one.
+  final DspEncoder dspEncoder;
+
+  /// The speak-mode voice. Optional with a silent default so the fakes-only
+  /// test constructor stays additive; the platform wiring passes the real
+  /// engine.
+  final TtsSpeaker tts;
+
+  /// The phone's own voices, for speech that is saved to a file rather
+  /// than read aloud: which languages they speak, and the way to save
+  /// them. Empty, with nothing to save with, unless the platform wiring
+  /// passes one.
+  final PhoneVoiceCache phoneVoices;
+
+  /// Names the engine the executor's far side should build for an
+  /// installed model file. Tests substitute a scripted engine.
+  final TranscribeEngineSpec Function(String modelPath) engineFor;
+
+  /// Where drift keeps the database, when the platform knows (main.dart
+  /// wires it; drift_flutter's default is documents-dir/trellis.sqlite).
+  /// Null for memory databases — the storage panel skips its row.
+  final File? databaseFile;
+
+  /// Whether this tier can run local ML at all (model downloads, whisper
+  /// transcription). False on the web tier — the PWA reads, studies,
+  /// listens and backs up; local ML rides the installed app — and the UI
+  /// doors consult this so they never offer what must fail (proposal-2
+  /// §1: honest about the tier).
+  final bool localMlAvailable;
+
+  /// The web tier's fetch-routing decision — see [WebFetchLane]. Meaningless
+  /// off the web tier; always [WebFetchLane.direct] there, since it's never
+  /// consulted for anything but the two web-only intake doors.
+  final WebFetchLane webFetchLane;
+
+  /// Where this app's confirmed recovery phrase is kept (the OS keychain in
+  /// production). Null on surfaces with no keychain — plain widget tests —
+  /// where backups ask for the phrase every time and no finish-setup
+  /// reminder is shown.
+  final BackupCustody? backupCustody;
+
+  /// The person's brain settings, read by the Translate sheet to offer
+  /// better Japanese. Null (tests, the background check) offers none.
+  final BrainStore? brainStore;
+
+  DeviceServices({
+    required this.supportDir,
+    required this.modelStore,
+    required this.registry,
+    required this.decoder,
+    required this.audioFetcher,
+    required this.executor,
+    required this.foregroundGate,
+    required this.engineFor,
+    TtsSpeaker? tts,
+    PhoneVoiceCache? phoneVoices,
+    DspEncoder? dspEncoder,
+    this.databaseFile,
+    this.localMlAvailable = true,
+    this.tier = DeviceTier.t1,
+    this.webFetchLane = WebFetchLane.direct,
+    this.backupCustody,
+    this.brainStore,
+  }) : tts = tts ?? NoopTtsSpeaker(),
+       phoneVoices = phoneVoices ?? PhoneVoiceCache(null),
+       dspEncoder = dspEncoder ?? UnavailableDspEncoder();
+
+  /// The platform wiring. [supportDir] is the app-support directory
+  /// (path_provider), resolved by an async `main` before `runApp`.
+  factory DeviceServices.real(Directory supportDir, {File? databaseFile}) =>
+      DeviceServices(
+        supportDir: supportDir,
+        modelStore: DiskModelStore(
+          baseDir: Directory('${supportDir.path}/models'),
+        ),
+        registry: ModelRegistry.starter(),
+        decoder: _isAndroid ? FfmpegDecoder() : WavPassthroughDecoder(),
+        audioFetcher: DioAudioFetcher.guarded(userAgent: trellisUserAgent),
+        executor: IsolateTranscribeExecutor(),
+        foregroundGate: _isAndroid
+            ? SharedJobForegroundGate(AndroidJobForegroundGate())
+            : NoopJobForegroundGate(),
+        tts: FlutterTtsSpeaker(),
+        phoneVoices: PhoneVoiceCache(
+            _isAndroid ? MethodChannelPhoneSpeechSaver() : null),
+        dspEncoder: _isAndroid ? FfmpegDspEncoder() : UnavailableDspEncoder(),
+        databaseFile: databaseFile,
+        backupCustody: SecureBackupCustody(),
+        brainStore: BrainStore.production(),
+        engineFor: (modelPath) => WhisperEngineSpec(
+          modelPath: modelPath,
+          libraryPath: whisperLibraryPath(),
+          libraryNote: whisperLibraryNote(),
+        ),
+      );
+
+  /// The background feed check's stack (ADR-0018): the same files as the
+  /// app, so downloads land where the player and eviction look, but no
+  /// foreground service. Android refuses to start one from the background,
+  /// and a check must not post a notification (ADR-0003 law 5).
+  factory DeviceServices.background(Directory supportDir) => DeviceServices(
+        supportDir: supportDir,
+        modelStore: DiskModelStore(
+          baseDir: Directory('${supportDir.path}/models'),
+        ),
+        registry: ModelRegistry.starter(),
+        decoder: WavPassthroughDecoder(),
+        audioFetcher: DioAudioFetcher.guarded(userAgent: trellisUserAgent),
+        executor: InlineTranscribeExecutor(),
+        foregroundGate: NoopJobForegroundGate(),
+        engineFor: (modelPath) => WhisperEngineSpec(
+          modelPath: modelPath,
+          libraryPath: whisperLibraryPath(),
+          libraryNote: whisperLibraryNote(),
+        ),
+      );
+
+  /// A placeholder for surfaces that never start a P3 flow (plain widget
+  /// tests): everything is present, nothing touches a platform. The support
+  /// dir points into systemTemp and is only created if actually used.
+  factory DeviceServices.detached({BackupCustody? backupCustody}) {
+    final dir = Directory(
+      '${Directory.systemTemp.path}/trellis-detached-services',
+    );
+    return DeviceServices(
+      supportDir: dir,
+      modelStore: DiskModelStore(baseDir: Directory('${dir.path}/models')),
+      registry: ModelRegistry.starter(),
+      decoder: WavPassthroughDecoder(),
+      audioFetcher: DioAudioFetcher(),
+      executor: InlineTranscribeExecutor(),
+      foregroundGate: NoopJobForegroundGate(),
+      backupCustody: backupCustody,
+      engineFor: (modelPath) => WhisperEngineSpec(
+        modelPath: modelPath,
+        libraryPath: whisperLibraryPath(),
+        libraryNote: whisperLibraryNote(),
+      ),
+    );
+  }
+
+  static bool get _isAndroid => !kIsWeb && Platform.isAndroid;
+
+  /// Android's pick between the baseline and dotprod shims, probed once
+  /// per isolate. Only arm64 parses ARM features; the x86_64 emulator
+  /// keeps the baseline name it has always had.
+  static final _androidWhisperLibrary = WhisperLibraryPicker(
+    androidArm64: _isAndroid && isAndroidArm64,
+    readCpuinfo: () => File('/proc/cpuinfo').readAsStringSync(),
+    // Binding, not just dlopen: a build missing a symbol falls back too.
+    open: WhisperBindings.open,
+  );
+
+  /// Where the whisper shim lives per platform: the APK's jniLibs resolve
+  /// a bare soname (the dotprod build when the CPU has it); desktops may
+  /// point `TRELLIS_WHISPER_LIB` at a build
+  /// (`natives/out/linux/libwhisper.so`), falling back to the loader path.
+  static String whisperLibraryPath() {
+    if (_isAndroid) return _androidWhisperLibrary.path;
+    final env = Platform.environment['TRELLIS_WHISPER_LIB'];
+    if (env != null && env.isNotEmpty) return env;
+    return 'libwhisper.so';
+  }
+
+  /// Why [whisperLibraryPath] is the baseline on a phone that might have
+  /// had dotprod; null otherwise. For the run's log line.
+  static String? whisperLibraryNote() =>
+      _isAndroid ? _androidWhisperLibrary.choice.reason : null;
+
+  /// The neural voice for [voiceSpec], if it's actually usable right now —
+  /// the localMlAvailable honesty gate, one layer deeper: even on a tier
+  /// that CAN run local ML, a specific voice must be DOWNLOADED before
+  /// speak mode may offer it. Returns null (never throws) when it isn't —
+  /// the reader's own door falls back to the system voice and, on a tier
+  /// that could have one, names what's missing (ADR-0006).
+  ///
+  /// The engine is constructed but NOT resident yet —
+  /// [PocketSpeechEngine], [KokoroSpeechEngine] and [PiperSpeechEngine]
+  /// open their ONNX Runtime
+  /// sessions lazily on first `synthesize()` — so this call is cheap even when nothing ends
+  /// up being spoken.
+  Future<SynthesisSpeechEngine?> speechEngineFor(ModelSpec voiceSpec) async {
+    if (!localMlAvailable) return null;
+    if (!tier.atLeast(voiceSpec.minTier)) return null;
+    if (!await modelStore.isDownloaded(voiceSpec)) return null;
+    final kokoro = voiceSpec.kokoroLayout;
+    if (kokoro != null) {
+      final modelPath = _pathForNamedFile(voiceSpec, kokoro.modelFileName);
+      final frontEnd = {
+        for (final e in kokoro.frontEndFileNames.entries)
+          e.key: _pathForNamedFile(voiceSpec, e.value),
+      };
+      return KokoroSpeechEngine(
+        voicePath: _pathForNamedFile(voiceSpec, kokoro.voiceFileName),
+        openModel: () => openKokoroModel(modelPath),
+        loadFrontEnd: () => loadKokoroFrontEnd(frontEnd),
+      );
+    }
+    final piper = voiceSpec.piperLayout;
+    if (piper != null) {
+      final modelPath = _pathForNamedFile(voiceSpec, piper.modelFileName);
+      final configPath = _pathForNamedFile(voiceSpec, piper.configFileName);
+      final stressName = piper.stressTableFileName;
+      final stressPath =
+          stressName == null ? null : _pathForNamedFile(voiceSpec, stressName);
+      return PiperSpeechEngine(
+        openModel: () => openPiperModel(modelPath),
+        loadFrontEnd: () =>
+            loadPiperFrontEnd(configPath: configPath, stressPath: stressPath),
+      );
+    }
+    final pocket = voiceSpec.pocketLayout;
+    final pocketLanguage =
+        PocketLanguage.byTag(voiceSpec.langs?.singleOrNull ?? '');
+    if (pocket != null && pocketLanguage != null) {
+      final files = PocketVoiceFiles(
+        textConditioner:
+            _pathForNamedFile(voiceSpec, pocket.textConditionerFileName),
+        main: _pathForNamedFile(voiceSpec, pocket.mainFileName),
+        flow: _pathForNamedFile(voiceSpec, pocket.flowFileName),
+        mimi: _pathForNamedFile(voiceSpec, pocket.mimiFileName),
+        tokenizer: _pathForNamedFile(voiceSpec, pocket.tokenizerFileName),
+        voice: _pathForNamedFile(voiceSpec, pocket.voiceFileName),
+      );
+      return PocketSpeechEngine(
+        language: pocketLanguage,
+        open: () => openPocketModel(files, pocketLanguage),
+      );
+    }
+    return null; // a mis-registered spec; refuse quietly
+  }
+
+  /// Resolves [fileName]'s on-disk path within [spec]'s own model
+  /// directory — every voice file downloads and verifies on its own
+  /// (no archive to extract), so [ModelStore.pathOf] already knows
+  /// where it landed; this just finds WHICH registered [ModelFile] the
+  /// layout's filename refers to.
+  String _pathForNamedFile(ModelSpec spec, String fileName) {
+    final file = spec.files.firstWhere(
+      (f) => Uri.parse(f.url).pathSegments.last == fileName,
+      orElse: () => throw StateError(
+        'model “${spec.id}”: no registered file named “$fileName”',
+      ),
+    );
+    return modelStore.pathOf(spec, file);
+  }
+
+  /// Where per-sentence WAV temp files live during neural speech playback
+  /// (ADR-0006) — swept clean at app start (`bootstrap_io.dart`'s
+  /// `createServices`) and by `SpeechPlaybackPipeline` itself on stop/
+  /// dispose. Meaningless on the web tier ([localMlAvailable] is always
+  /// false there, so a `ReaderScreen` never resolves a synthesis engine to
+  /// begin with), but safe to construct there too — the same "construct,
+  /// never touch" rule as [supportDir] itself.
+  Directory get speechTempDir => Directory('${supportDir.path}/speech-temp');
+
+  /// Where Share puts a copy of an audio file named by its title (the
+  /// app keeps audio under a number). Only the newest share's copy is
+  /// kept: each share empties it first.
+  Directory get shareTempDir => Directory('${supportDir.path}/share-temp');
+
+  /// Where a deleted transcript or translation waits 30 days to be
+  /// restored (1.5.9). Null on the web tier, which has no files to keep it
+  /// in; its deletes ask first instead.
+  RecentlyDeleted? get recentlyDeleted => localMlAvailable
+      ? RecentlyDeleted(Directory('${supportDir.path}/recently_deleted'))
+      : null;
+
+  /// Builds a FRESH [DiskSpeechTempFiles] for one speaking run — a factory,
+  /// not a shared instance, since each run needs its own run id (the "two
+  /// runs' files never collide" law). `ReaderScreen.createSpeechTempFiles`
+  /// takes exactly this shape.
+  SpeechTempFiles Function() get createSpeechTempFiles =>
+      () => DiskSpeechTempFiles(dir: speechTempDir);
+
+  /// The ONE call a `ReaderScreen` closes over (ADR-0006): every voice
+  /// downloaded here, one per language (board-0211), behind one engine
+  /// ([DownloadedVoices]) that hands each sentence to the voice for its
+  /// language. Null when none is downloaded, or when [lang] is given and
+  /// no downloaded voice speaks it: the system voice then. Never throws.
+  Future<SynthesisSpeechEngine?> resolveSpeechEngine({String? lang}) async {
+    final byLang = await _downloadedVoices();
+    if (byLang.isEmpty) return null;
+    if (lang != null && lang.trim().isNotEmpty) {
+      if (!byLang.containsKey(baseLangTag(lang))) return null;
+    }
+    return DownloadedVoices(
+      voiceByLang: {for (final e in byLang.entries) e.key: e.value.id},
+      open: (id) async {
+        final engine = await speechEngineFor(registry.byId(id)!);
+        if (engine == null) {
+          throw StateError('voice “$id” is no longer downloaded');
+        }
+        return engine;
+      },
+    );
+  }
+
+  /// The languages a downloaded voice speaks here; empty with none.
+  Future<Set<String>> downloadedVoiceLangs() async =>
+      (await _downloadedVoices()).keys.toSet();
+
+  /// Each language some downloaded, runnable voice speaks, with it.
+  Future<Map<String, ModelSpec>> _downloadedVoices() async {
+    if (!localMlAvailable) return const {};
+    final out = <String, ModelSpec>{};
+    for (final lang in registry.voiceLangs(tier)) {
+      final spec = registry.voiceFor(lang, tier);
+      if (spec == null) continue;
+      if (!await modelStore.isDownloaded(spec)) continue;
+      out[lang] = spec;
+    }
+    return out;
+  }
+
+  /// The Marian translator (ADR-0008 "Babel" Phase 3) for [modelSpec], if
+  /// it's actually usable right now — [speechEngineFor]'s same
+  /// download-honesty gate, one layer deeper: even on a tier that CAN run
+  /// local ML, the model must be DOWNLOADED before a run may open it. Returns null (never throws) when
+  /// it isn't. Cheap: [MarianTranslator] opens its ONNX Runtime sessions
+  /// lazily on first `translate()`, so this call never touches a file.
+  Future<MarianTranslator?> translatorFor(ModelSpec modelSpec) async {
+    if (!localMlAvailable) return null;
+    if (!tier.atLeast(modelSpec.minTier)) return null;
+    final layout = modelSpec.marianLayout;
+    if (layout == null) return null; // a mis-registered spec; refuse quietly
+    if (!await modelStore.isDownloaded(modelSpec)) return null;
+    return MarianTranslator(
+      files: MarianTranslatorFiles(
+        encoderPath: _pathForNamedFile(modelSpec, layout.encoderFileName),
+        decoderMergedPath:
+            _pathForNamedFile(modelSpec, layout.decoderMergedFileName),
+        sourceSpmPath: _pathForNamedFile(modelSpec, layout.sourceSpmFileName),
+        vocabPath: _pathForNamedFile(modelSpec, layout.vocabFileName),
+        configPath: _pathForNamedFile(modelSpec, layout.configFileName),
+        tokenizerConfigPath:
+            _pathForNamedFile(modelSpec, layout.tokenizerConfigFileName),
+        targetToken: layout.targetToken,
+      ),
+    );
+  }
+
+  /// Translation for every screen that opens a reader (1.5.5): routes
+  /// from any language with their download sizes, the download, and
+  /// [translatorFor] behind it. Null where local ML can't run (the web
+  /// tier), which hides Translate rather than offering a dead end.
+  late final TranslationService? translation = localMlAvailable
+      ? TranslationService(
+          registry: registry,
+          tier: tier,
+          store: modelStore,
+          openSpec: translatorFor,
+          foreground: foregroundGate,
+          brain: brainStore,
+        )
+      : null;
+
+  /// Campaign 4 Phase 3's own version of [resolveSpeechEngine]: the ONE
+  /// call `ReaderScreen` closes over for the definition sheet. Parses the
+  /// on-disk dictionary at most once per [DeviceServices] instance
+  /// (the residency law — [_dictionary] caches the built
+  /// [StarDictDictionary], not just the file paths, since building it
+  /// means reading the whole `.idx` and sorting it) and reuses it for
+  /// every later lookup this session. Null covers every honest "nothing
+  /// to show" case alike (no dictionary registered for this tier, none
+  /// downloaded yet, or the word truly isn't in it) — the sheet shows one
+  /// calm empty state regardless of which.
+  StarDictDictionary? _dictionary;
+  bool _dictionaryLoadAttempted = false;
+
+  Future<String?> lookupDefinition(String word) async {
+    final dict = await _openDictionary();
+    if (dict == null) return null;
+    final match = dict.lookup(word);
+    if (match == null) return null;
+    return _stripHtml(dict.definitionOf(match.entry));
+  }
+
+  Future<StarDictDictionary?> _openDictionary() async {
+    if (_dictionary != null) return _dictionary;
+    if (_dictionaryLoadAttempted) return null; // tried once, nothing there
+    _dictionaryLoadAttempted = true;
+    if (!localMlAvailable) return null;
+    final spec = registry.pickModel(ModelTask.dictionary, tier);
+    if (spec == null) return null;
+    final layout = spec.dictionaryArchiveLayout;
+    if (layout == null) return null;
+    if (!await modelStore.isDownloaded(spec)) return null;
+    final dir = modelStore.dictionaryDirOf(spec);
+    try {
+      final ifoRaw = await File('$dir/${layout.ifoFileName}').readAsString();
+      final idxBytes = await File('$dir/${layout.idxFileName}').readAsBytes();
+      final dictBytes =
+          await File('$dir/${layout.dictFileName}').readAsBytes();
+      StarDictIfo.parse(ifoRaw); // validated, but only entries/body matter
+      final entries = parseIdx32(idxBytes);
+      _dictionary =
+          StarDictDictionary(entries: entries, body: DictzipBody(dictBytes));
+      return _dictionary;
+    } on FormatException {
+      return null; // a corrupt/partial dictionary reads as "none available"
+    } on FileSystemException {
+      return null;
+    }
+  }
+
+  static final _tagRe = RegExp('<[^>]*>');
+  static final _wsRe = RegExp(r'[ \t]+');
+  static final _blankLinesRe = RegExp(r'\n{3,}');
+
+  /// A calm, plain-text rendering of a `sametypesequence=h` (HTML) entry
+  /// body — good enough for a dismissible sheet without pulling in a full
+  /// HTML renderer this pass: block-level tags become line breaks, then
+  /// every remaining tag is dropped and a small set of entities decoded.
+  static String _stripHtml(String html) {
+    var s = html
+        .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+        .replaceAll(RegExp(r'</(p|li|div|h[1-6])>', caseSensitive: false), '\n')
+        .replaceAll(RegExp(r'<li[^>]*>', caseSensitive: false), '• ');
+    s = s.replaceAll(_tagRe, '');
+    s = s
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#39;', "'")
+        .replaceAll('&nbsp;', ' ');
+    s = s.replaceAll(_wsRe, ' ');
+    s = s.replaceAll(_blankLinesRe, '\n\n');
+    return s.trim();
+  }
+
+  File audioFileFor(int workId, String url) {
+    final path = Uri.parse(url).path;
+    final dot = path.lastIndexOf('.');
+    final ext = dot < 0 || path.length - dot > 6 ? '' : path.substring(dot);
+    return File('${supportDir.path}/audio/$workId$ext');
+  }
+
+  File pcmFileFor(int workId) => File('${supportDir.path}/pcm/$workId.f32');
+
+  /// Where a feed's downloaded channel artwork lives (Campaign 9 Phase 5,
+  /// "the river gets faces") — deterministic on the feed id alone, so
+  /// nothing needs to persist a local path: the river checks this exact
+  /// file's existence and never fetches at render (see
+  /// `FeedsRepository`'s fetch-once law).
+  File artworkFileFor(int feedId) =>
+      File('${supportDir.path}/artwork/$feedId.img');
+
+  /// An episode's own artwork, named by its URL so episodes that share
+  /// one image share one file. Same fetch-once, read-only-at-render law
+  /// as [artworkFileFor].
+  File episodeArtworkFileFor(String imageUrl) => File(
+      '${supportDir.path}/artwork/episodes/'
+      '${sha1.convert(utf8.encode(imageUrl))}.img');
+
+  /// Campaign 7 (ADR-0013): where an audiobook's own copied files live —
+  /// one directory per book, so removing a book is deleting one directory
+  /// rather than hunting down N files by row.
+  Directory audiobookDirFor(int workId) =>
+      Directory('${supportDir.path}/audiobooks/$workId');
+
+  /// The copied destination for file [fileIdx] of audiobook [workId],
+  /// preserving [sourceName]'s own extension (chapter parsing and
+  /// playback both key off the extension, e.g. distinguishing an m4b's
+  /// chpl atom from an mp3 with no chapters of its own).
+  File audiobookFileFor(int workId, int fileIdx, String sourceName) {
+    final dot = sourceName.lastIndexOf('.');
+    final ext =
+        dot < 0 || sourceName.length - dot > 6 ? '' : sourceName.substring(dot);
+    return File('${audiobookDirFor(workId).path}/$fileIdx$ext');
+  }
+}

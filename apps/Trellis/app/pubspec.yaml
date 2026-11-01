@@ -1,0 +1,86 @@
+name: trellis
+description: 'Read, listen, study, remember: a local-first reader, podcast inbox and
+  study app.'
+publish_to: none
+version: 1.6.20+2042
+environment:
+  sdk: ^3.10.7
+dependencies:
+  flutter:
+    sdk: flutter
+  loom_core:
+    path: ../packages/loom_core
+  sqlite3: ^2.9.0
+  study_core:
+    path: ../packages/study_core
+  intake_core:
+    path: ../packages/intake_core
+  comms_core:
+    path: ../packages/comms_core
+  jobs_core:
+    path: ../packages/jobs_core
+  ml_runtime:
+    path: ../packages/ml_runtime
+  transcribe_core:
+    path: ../packages/transcribe_core
+  whisper_ffi:
+    path: ../packages/whisper_ffi
+  stardict_core:
+    path: ../packages/stardict_core
+  mandarin_g2p:
+    path: ../packages/mandarin_g2p
+  russian_g2p:
+    path: ../packages/russian_g2p
+  domovoi:
+    path: ../../../packages/domovoi
+  dio: ^5.9.0
+  crypto: 3.0.8
+  ffmpeg_kit_flutter_new_audio: ^2.5.2
+  flutter_foreground_task: ^9.1.0
+  drift: '>=2.28.2 <2.32.0'
+  drift_flutter: ^0.2.0
+  path_provider: ^2.1.0
+  path: ^1.9.0
+  share_plus: ^12.0.2
+  file_picker: ^10.3.8
+  pdfium_flutter: 0.1.9
+  ffi: ^2.1.4
+  just_audio: ^0.10.5
+  audio_service: ^0.18.19
+  just_audio_platform_interface: ^4.6.0
+  audio_session: ^0.2.4
+  flutter_tts: ^4.2.0
+  flutter_onnxruntime: ^1.8.3
+  archive: ^4.0.0
+  backup_core:
+    path: ../packages/backup_core
+  sanctuary_backup_ui:
+    path: ../../../packages/sanctuary_backup_ui
+  sanctuary_auth_core:
+    path: ../../../packages/sanctuary_auth_core
+  brain_wiring:
+    path: ../packages/brain_wiring
+  flutter_secure_storage: ^9.2.4
+  openhearth_design:
+    path: ../../../packages/ohStyle/openhearth_design
+  url_launcher: ^6.3.2
+  html: ^0.15.6
+  sensors_plus: ^7.1.0
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  drift_dev: '>=2.28.0 <2.32.0'
+  build_runner: '>=2.5.4 <2.14.0'
+  oh_fleet_conformance:
+    path: ../../../packages/oh_fleet_conformance
+  flutter_lints: ^6.0.0
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/courses/kalman.ohcourse
+    - assets/licenses/pdfium.txt
+  fonts:
+    - family: NotoSansMono
+      fonts:
+        - asset: assets/fonts/NotoSansMono-Subset.ttf
+resolution: workspace

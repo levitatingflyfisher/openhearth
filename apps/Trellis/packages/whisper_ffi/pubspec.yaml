@@ -1,0 +1,14 @@
+name: whisper_ffi
+description: "whisper.cpp behind ml_runtime's Transcriber seam \u2014 dart:ffi bindings\
+  \ over the pinned native shim built in ../../natives."
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.10.7
+dependencies:
+  ffi: ^2.1.0
+  ml_runtime:
+    path: ../ml_runtime
+dev_dependencies:
+  test: ^1.25.0
+resolution: workspace

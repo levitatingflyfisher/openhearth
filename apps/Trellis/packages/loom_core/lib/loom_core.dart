@@ -1,0 +1,11 @@
+/// The content spine (ADR-0002) and its kept/unkept bit (ADR-0019),
+/// plus the ohPrimer-donor text ingestion: the plain-text structure parser
+/// and the RSVP tokenizer. Also the sentence splitter for speak mode
+/// (ADR-0006).
+library;
+
+export 'src/cjk.dart';
+export 'src/sentence_splitter.dart';
+export 'src/spine.dart';
+export 'src/text_parser.dart';
+export 'src/tokenizer.dart';

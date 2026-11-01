@@ -1,0 +1,246 @@
+import 'dart:io';
+
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite3/sqlite3.dart' as raw;
+import 'package:trellis/db/database.dart';
+import 'package:trellis/features/reader/reader_prefs.dart';
+
+import '../support/schema_strip.dart';
+
+/// The speak-voice preference (ADR-0006's settings escape): a profile-scoped
+/// bool, false by default — the same "on-device state the reader already
+/// persists" surface as Positions, never a second prefs mechanism.
+void main() {
+  late AppDatabase db;
+  setUp(() => db = AppDatabase.forTesting(NativeDatabase.memory()));
+  tearDown(() => db.close());
+
+  test(
+    'a fresh profile defaults to false — neural whenever one is on-device',
+    () async {
+      final profileId = await db.profilesDao.create('Ada');
+      expect(await db.profilesDao.preferSystemVoice(profileId), isFalse);
+    },
+  );
+
+  test(
+    'setting it true persists across reads, scoped to this profile only',
+    () async {
+      final ada = await db.profilesDao.create('Ada');
+      final bea = await db.profilesDao.create('Bea');
+
+      await db.profilesDao.setPreferSystemVoice(ada, true);
+
+      expect(await db.profilesDao.preferSystemVoice(ada), isTrue);
+      expect(
+        await db.profilesDao.preferSystemVoice(bea),
+        isFalse,
+        reason: 'the preference is per-profile, never global',
+      );
+    },
+  );
+
+  test('flipping it back to false persists too', () async {
+    final profileId = await db.profilesDao.create('Ada');
+    await db.profilesDao.setPreferSystemVoice(profileId, true);
+    await db.profilesDao.setPreferSystemVoice(profileId, false);
+    expect(await db.profilesDao.preferSystemVoice(profileId), isFalse);
+  });
+
+  group('Latest\'s last visit (ADR-0019)', () {
+    test('the first open has no previous visit; each open hands back the '
+        'one before and records its own, per profile', () async {
+      final ada = await db.profilesDao.create('Ada');
+      final blaise = await db.profilesDao.create('Blaise');
+      expect(await db.profilesDao.swapLatestSeen(ada, nowMs: 100), isNull);
+      expect(await db.profilesDao.swapLatestSeen(ada, nowMs: 200), 100);
+      expect(await db.profilesDao.swapLatestSeen(blaise, nowMs: 300), isNull);
+      expect(await db.profilesDao.swapLatestSeen(ada, nowMs: 400), 200);
+    });
+  });
+
+  group('scheduler (study crown: Classic | FSRS, per profile)', () {
+    test('a fresh profile defaults to fsrs', () async {
+      final profileId = await db.profilesDao.create('Ada');
+      expect(await db.profilesDao.scheduler(profileId), 'fsrs');
+    });
+
+    test('setting it to classic persists, scoped to this profile only',
+        () async {
+      final ada = await db.profilesDao.create('Ada');
+      final bea = await db.profilesDao.create('Bea');
+
+      await db.profilesDao.setScheduler(ada, 'classic');
+
+      expect(await db.profilesDao.scheduler(ada), 'classic');
+      expect(
+        await db.profilesDao.scheduler(bea),
+        'fsrs',
+        reason: 'the scheduler choice is per-profile, never global',
+      );
+    });
+
+    test('switching back to classic persists too', () async {
+      final profileId = await db.profilesDao.create('Ada');
+      await db.profilesDao.setScheduler(profileId, 'fsrs');
+      await db.profilesDao.setScheduler(profileId, 'classic');
+      expect(await db.profilesDao.scheduler(profileId), 'classic');
+    });
+  });
+
+  group('dspGlobalDefault (Campaign 6: the offline DSP household default)', () {
+    test('a fresh profile defaults to false — processing is opt-in', () async {
+      final profileId = await db.profilesDao.create('Ada');
+      expect(await db.profilesDao.dspGlobalDefault(profileId), isFalse);
+    });
+
+    test('setting it true persists, scoped to this profile only', () async {
+      final ada = await db.profilesDao.create('Ada');
+      final bea = await db.profilesDao.create('Bea');
+
+      await db.profilesDao.setDspGlobalDefault(ada, true);
+
+      expect(await db.profilesDao.dspGlobalDefault(ada), isTrue);
+      expect(
+        await db.profilesDao.dspGlobalDefault(bea),
+        isFalse,
+        reason: 'the household default is per-profile, never fleet-wide',
+      );
+    });
+
+    test('flipping it back to false persists too', () async {
+      final profileId = await db.profilesDao.create('Ada');
+      await db.profilesDao.setDspGlobalDefault(profileId, true);
+      await db.profilesDao.setDspGlobalDefault(profileId, false);
+      expect(await db.profilesDao.dspGlobalDefault(profileId), isFalse);
+    });
+  });
+
+  group('recordLastPlayed (Campaign 9 Phase 2, "resume after restart")', () {
+    test('a fresh profile has no last-played work', () async {
+      final profileId = await db.profilesDao.create('Ada');
+      expect((await db.profilesDao.readerPrefs(profileId)).lastPlayedWorkId,
+          isNull);
+    });
+
+    test('recording a play persists it, scoped to this profile only',
+        () async {
+      final ada = await db.profilesDao.create('Ada');
+      final bea = await db.profilesDao.create('Bea');
+
+      await db.profilesDao.recordLastPlayed(ada, 42);
+
+      expect(
+          (await db.profilesDao.readerPrefs(ada)).lastPlayedWorkId, 42);
+      expect(
+          (await db.profilesDao.readerPrefs(bea)).lastPlayedWorkId,
+          isNull,
+          reason: 'the last-played work is per-profile, never fleet-wide');
+    });
+
+    test('recording a second play replaces the first', () async {
+      final profileId = await db.profilesDao.create('Ada');
+      await db.profilesDao.recordLastPlayed(profileId, 1);
+      await db.profilesDao.recordLastPlayed(profileId, 2);
+      expect((await db.profilesDao.readerPrefs(profileId)).lastPlayedWorkId,
+          2);
+    });
+
+    test('recording a play never touches typography already saved in the '
+        'same blob', () async {
+      final profileId = await db.profilesDao.create('Ada');
+      await db.profilesDao.setReaderPrefs(
+          profileId,
+          const ReaderPrefs(
+              typography: ReaderTypography(fontScale: 1.4)));
+
+      await db.profilesDao.recordLastPlayed(profileId, 7);
+
+      final prefs = await db.profilesDao.readerPrefs(profileId);
+      expect(prefs.typography.fontScale, 1.4);
+      expect(prefs.lastPlayedWorkId, 7);
+    });
+
+    // 1.5.9: the player, the reader and the typography screen all write
+    // the one blob. Each change is applied to what is stored at that
+    // moment, never to a copy read earlier, so no writer undoes another.
+    test('writers of the shared blob never undo one another', () async {
+      final profileId = await db.profilesDao.create('Ada');
+
+      await Future.wait([
+        db.profilesDao.recordLastPlayed(profileId, 7),
+        db.profilesDao.updateReaderPrefs(
+            profileId,
+            (p) => p.copyWith(
+                typography: const ReaderTypography(fontScale: 1.4))),
+        db.profilesDao.recordPlayerClosed(profileId),
+      ]);
+
+      final prefs = await db.profilesDao.readerPrefs(profileId);
+      expect(prefs.lastPlayedWorkId, 7);
+      expect(prefs.typography.fontScale, 1.4);
+      expect(prefs.playerClosed, isTrue);
+    });
+  });
+
+  group('schema migration v8 → v9', () {
+    test('a v8 database gains profiles.scheduler, defaulted to classic, '
+        'and keeps its data', () async {
+      final dir = Directory.systemTemp.createTempSync('trellis-migration-v9');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final file = File('${dir.path}/v8.sqlite');
+
+      // Build a real v8 file from drift's own DDL: create at the current
+      // version, drop exactly what v9 added, stamp user_version 8. v9 is
+      // purely additive (one addColumn), so what remains IS the v8 schema
+      // — except every later campaign hop (v12 through v18) also landed
+      // columns on tables v8 already had, all after this test was written;
+      // those columns are stripped too, or a v8 snapshot would silently
+      // carry them from the future.
+      final seed = AppDatabase.forTesting(NativeDatabase(file));
+      final adaId = await seed.profilesDao.create('Ada');
+      await seed.close();
+      final v8 = raw.sqlite3.open(file.path);
+      v8.execute('''
+        $stripV26
+        ALTER TABLE feeds DROP COLUMN image_url;
+        ALTER TABLE profiles DROP COLUMN scheduler;
+        ALTER TABLE profiles DROP COLUMN keep_finished_in_queue;
+        ALTER TABLE feeds DROP COLUMN speed_override;
+        ALTER TABLE feeds DROP COLUMN skip_intro_seconds;
+        ALTER TABLE feeds DROP COLUMN skip_outro_seconds;
+        ALTER TABLE feeds DROP COLUMN keep_latest_audio;
+        ALTER TABLE episodes DROP COLUMN archived_at_ms;
+        ALTER TABLE works DROP COLUMN show_translation_layer;
+        ALTER TABLE works DROP COLUMN active_translation_lang;
+        ALTER TABLE feeds DROP COLUMN rules_json;
+        ALTER TABLE episodes DROP COLUMN dedup_reason;
+        ALTER TABLE episodes DROP COLUMN duplicate_of_work_id;
+        ALTER TABLE feeds DROP COLUMN dsp_enabled;
+        ALTER TABLE episodes DROP COLUMN dsp_original_duration_ms;
+        ALTER TABLE episodes DROP COLUMN dsp_processed_duration_ms;
+        ALTER TABLE profiles DROP COLUMN dsp_global_default;
+        ALTER TABLE player_positions DROP COLUMN file_idx;
+        ALTER TABLE profiles DROP COLUMN reader_prefs_json;
+        DROP TABLE reading_days;
+        ALTER TABLE jobs DROP COLUMN failure_reason;
+        ALTER TABLE episodes DROP COLUMN finished_at_ms;
+        ALTER TABLE episodes DROP COLUMN image_url;
+        ALTER TABLE feeds DROP COLUMN sort_oldest_first;
+        ALTER TABLE feeds DROP COLUMN origin;
+        PRAGMA user_version = 8;
+      ''');
+      v8.dispose();
+
+      final migrated = AppDatabase.forTesting(NativeDatabase(file));
+      addTearDown(migrated.close);
+
+      // Old data survives…
+      final profiles = await migrated.profilesDao.all();
+      expect(profiles.single.name, 'Ada');
+      // …and the new column reads its default rather than throwing.
+      expect(await migrated.profilesDao.scheduler(adaId), 'fsrs');
+    });
+  });
+}
