@@ -1,0 +1,89 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
+
+import '../../../../core/errors/result.dart';
+import '../../../../core/providers/repository_providers.dart';
+import '../../../../core/providers/retry_policy.dart';
+import '../../domain/entities/growth_record.dart';
+
+const _uuid = Uuid();
+
+final growthRecordsProvider =
+    StreamProvider.family<List<GrowthRecordEntity>, String>((ref, babyId) {
+  final repo = ref.watch(growthRepositoryProvider);
+  return repo.watchAllForBaby(babyId);
+},
+  retry: noAutoRetry,
+);
+
+/// A Drift watch, not a one-shot read: a one-shot read was cached for the
+/// app's lifetime and kept showing the first measurement it saw, through
+/// every new measurement and every restore.
+final latestGrowthProvider =
+    StreamProvider.family<GrowthRecordEntity?, String>((ref, babyId) {
+  return ref.watch(growthRepositoryProvider).watchLatest(babyId);
+},
+  retry: noAutoRetry,
+);
+
+final growthControllerProvider =
+    NotifierProvider<GrowthController, AsyncValue<void>>(GrowthController.new);
+
+class GrowthController extends Notifier<AsyncValue<void>> {
+  @override
+  AsyncValue<void> build() => const AsyncData(null);
+
+  Future<Result<GrowthRecordEntity>> createRecord({
+    required String babyId,
+    required DateTime measuredAt,
+    double? weightKg,
+    double? heightCm,
+    double? headCircumferenceCm,
+    String? notes,
+  }) async {
+    final now = DateTime.now();
+    final record = GrowthRecordEntity(
+      id: _uuid.v4(),
+      babyId: babyId,
+      measuredAt: measuredAt,
+      weightKg: weightKg,
+      heightCm: heightCm,
+      headCircumferenceCm: headCircumferenceCm,
+      notes: notes,
+      createdAt: now,
+      modifiedAt: now,
+    );
+
+    state = const AsyncLoading();
+    final repo = ref.read(growthRepositoryProvider);
+    final result = await repo.createGrowthRecord(record);
+
+    return switch (result) {
+      Success() => () {
+          state = const AsyncData(null);
+          return Success(record);
+        }(),
+      Err(failure: final f) => () {
+          state = AsyncError(f.cause ?? f.message, f.stackTrace ?? StackTrace.current);
+          return Err<GrowthRecordEntity>(f);
+        }(),
+    };
+  }
+
+  Future<Result<void>> updateRecord(GrowthRecordEntity record) async {
+    final repo = ref.read(growthRepositoryProvider);
+    return repo.updateGrowthRecord(record.copyWith(modifiedAt: DateTime.now()));
+  }
+
+  Future<Result<void>> deleteRecord(String id) async {
+    final repo = ref.read(growthRepositoryProvider);
+    return repo.deleteGrowthRecord(id);
+  }
+
+  /// Puts back exactly the row a delete took (same id and timestamps), for
+  /// the Undo offered after a deliberate delete.
+  Future<Result<void>> restoreRecord(GrowthRecordEntity deleted) async {
+    final repo = ref.read(growthRepositoryProvider);
+    return repo.restoreGrowthRecord(deleted);
+  }
+}

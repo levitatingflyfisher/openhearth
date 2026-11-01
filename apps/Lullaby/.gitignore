@@ -1,0 +1,70 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+/out/
+/android/build/
+/android/app/build/
+*.apk
+*.aab
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+/android/.kotlin/
+
+# Local working artifacts — do not commit.
+# NOTE: AGENTS.md is intentionally NOT ignored — it is a shipped contributor
+# guide committed at the repo root. The per-tool scratch guides below stay ignored.
+CLAUDE.md
+GEMINI.md
+docs/superpowers/
+.superpowers/
+/docs/superpowers/
+test/visual/failures/
+.claude/
+
+# Generated sources — CI and every local build run build_runner, so a
+# committed copy is only a copy that can go stale:
+# `dart run build_runner build --delete-conflicting-outputs`
+*.g.dart
+
+# The sync kernel's WASM, built by tool/build_web.sh (ADR-0007).
+/web/pkg/

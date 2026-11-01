@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android's own backup to Google is the phone owner's choice (owner's ruling,
+  3 July 2026): the app allows it and Android settings decide. The database,
+  photos and the encrypted vault snapshots may go. The key store may not:
+  flutter_secure_storage keeps the 12 recovery words, the sync settings and the
+  key that wraps them in this one shared-preferences file, and words in a
+  backup would let a Google account open the household's sync. See
+  android_backup_option_test.dart.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    </device-transfer>
+</data-extraction-rules>

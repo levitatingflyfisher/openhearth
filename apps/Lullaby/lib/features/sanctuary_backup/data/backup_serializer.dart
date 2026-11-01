@@ -1,0 +1,363 @@
+import 'dart:convert';
+
+import 'package:drift/drift.dart';
+import 'package:path/path.dart' as p;
+import 'package:sanctuary_backup_ui/sanctuary_backup_ui.dart';
+
+import '../../../services/database/database.dart';
+import '../../babies/presentation/widgets/baby_photo.dart';
+import 'backup_photo.dart';
+
+/// Serializes all Lullaby user data to/from a JSON [Uint8List] for encrypted
+/// backup via sanctuary_backup_ui.
+///
+/// Works directly with [AppDatabase] to get full-table dumps — not filtered by
+/// baby like the DAOs. Implements the package's [BackupSerializer] interface;
+/// the JSON envelope and table logic are unchanged from Lullaby's shipped
+/// format (SANCTUARY-BRIEF §4.W1: keep envelope/table logic identical).
+class LullabyBackupSerializer
+    implements BackupSerializer, PreviewableBackupSerializer {
+  final AppDatabase _db;
+
+  /// Whether household sync is on. A restore wipes and refills every table in
+  /// one transaction, which the sync log cannot take as one step, so while
+  /// sync is on a restore is refused (ADR-0007) rather than half-applied.
+  final Future<bool> Function()? syncOn;
+
+  /// The baby photos as files. The backup carries each photo itself, not
+  /// only its path (owner's ruling, board-0167), so a restore on a new
+  /// phone brings the photo back.
+  final BabyPhotoFiles photos;
+
+  const LullabyBackupSerializer(
+    this._db, {
+    this.syncOn,
+    this.photos = const BabyPhotoFiles(),
+  });
+
+  static const String _appId = 'lullaby';
+
+  /// Reads every user-data table and returns the JSON payload as bytes.
+  ///
+  /// The shape is Lullaby's SHIPPED one (`schemaVersion`/`exportedAt`/
+  /// top-level `tables`) with two ADDITIVE keys the v2 retention spec
+  /// needs (`app`, `createdAt`). Old shipped readers only look at
+  /// schemaVersion + tables and ignore unknown keys, so backups made by
+  /// this build still restore on pre-v2 Lullaby installs — the wire
+  /// format is extended, never broken.
+  @override
+  Future<Uint8List> dumpAll() async {
+    final allBabies = await _db.select(_db.babies).get();
+    final allFeedings = await _db.select(_db.feedingLogs).get();
+    final allSleeps = await _db.select(_db.sleepLogs).get();
+    final allDiapers = await _db.select(_db.diaperLogs).get();
+    final allGrowth = await _db.select(_db.growthRecords).get();
+    final allMedicine = await _db.select(_db.medicineLogs).get();
+    final allVaccines = await _db.select(_db.vaccineRecords).get();
+    final allNotes = await _db.select(_db.handoffNotes).get();
+    final babyPhotos = <Map<String, dynamic>>[];
+    for (final baby in allBabies) {
+      final bytes = await photos.read(baby.photoPath);
+      if (bytes == null) continue;
+      final photo = await fitPhotoForBackup(
+          bytes, safePhotoExtension(p.extension(baby.photoPath!)));
+      if (photo == null) continue;
+      babyPhotos.add({
+        'babyId': baby.id,
+        'extension': photo.extension,
+        'data': base64Encode(photo.bytes),
+      });
+    }
+
+    final stamp = DateTime.now().toUtc().toIso8601String();
+    final payload = <String, dynamic>{
+      'app': _appId,
+      'schemaVersion': _db.schemaVersion,
+      'exportedAt': stamp,
+      'createdAt': stamp,
+      'tables': {
+        'babies': allBabies.map((r) => r.toJson()).toList(),
+        'feedingLogs': allFeedings.map((r) => r.toJson()).toList(),
+        'sleepLogs': allSleeps.map((r) => r.toJson()).toList(),
+        'diaperLogs': allDiapers.map((r) => r.toJson()).toList(),
+        'growthRecords': allGrowth.map((r) => r.toJson()).toList(),
+        'medicineLogs': allMedicine.map((r) => r.toJson()).toList(),
+        'vaccineRecords': allVaccines.map((r) => r.toJson()).toList(),
+        // Additive (schema 5): older readers ignore an unknown table.
+        'handoffNotes': allNotes.map((r) => r.toJson()).toList(),
+        // Additive: the photos themselves, base64, each within
+        // maxBackupPhotoBytes. Older readers ignore an unknown table and
+        // keep the row's path, as before.
+        'babyPhotos': babyPhotos,
+      },
+    };
+
+    return Uint8List.fromList(utf8.encode(jsonEncode(payload)));
+  }
+
+  /// The dry-run parse behind preview-before-restore and export
+  /// read-back: validates like [restoreAll], never writes.
+  @override
+  Future<BackupManifest> describeBackup(Uint8List plaintext) async {
+    _requireTables(_unwrap(plaintext).payload);
+    return BackupEnvelope.describe(plaintext);
+  }
+
+  /// The tables gate [restoreAll] applies — shared so describe and
+  /// restore can never drift apart again.
+  static Map<String, dynamic> _requireTables(Map<String, Object?> payload) {
+    final tables = payload['tables'];
+    if (tables is! Map<String, dynamic>) {
+      throw const FormatException('Missing tables in backup payload');
+    }
+    return tables;
+  }
+
+  /// Envelope validation via the shared helper. `requireAppKey: false`
+  /// because every backup shipped Lullaby ever wrote has NO `app` key —
+  /// an absent key is tolerated, a present-and-wrong one still rejects.
+  /// (The AEAD context already binds the blob to Lullaby
+  /// cryptographically; this is defense in depth.)
+  UnwrappedBackup _unwrap(Uint8List data) => BackupEnvelope.unwrap(
+        data,
+        expectedAppId: _appId,
+        currentSchemaVersion: _db.schemaVersion,
+        requireAppKey: false,
+      );
+
+  /// Restores all user data from a JSON [Uint8List] previously created by
+  /// [dumpAll].
+  ///
+  /// **This is destructive** — all existing data is wiped before inserting.
+  ///
+  /// Throws [BackupSchemaException] if the payload's schema version is newer
+  /// than the current database version.
+  /// Throws [FormatException] if the payload is not valid JSON or is missing
+  /// required fields.
+  @override
+  Future<void> restoreAll(Uint8List data) async {
+    if (await syncOn?.call() ?? false) throw const RestoreWhileSyncingException();
+    final tables = _requireTables(_unwrap(data).payload);
+
+    // The photos are written before the rows that name them, under new
+    // names, and removed again if the restore fails.
+    final restoredPhotos = await _savePhotos(tables);
+    try {
+      await _restoreRows(tables, restoredPhotos);
+    } catch (_) {
+      for (final path in restoredPhotos.values) {
+        await photos.remove(path);
+      }
+      rethrow;
+    }
+  }
+
+  /// Writes each photo the backup carries into the photo folder and returns
+  /// the new path by baby id. A restored backup is untrusted input: an entry
+  /// that is malformed, not base64 or over [maxBackupPhotoBytes] is skipped,
+  /// and the baby keeps its row's path, as with an older backup.
+  Future<Map<String, String>> _savePhotos(Map<String, dynamic> tables) async {
+    final saved = <String, String>{};
+    final entries = tables['babyPhotos'];
+    if (entries is! List) return saved;
+    for (final entry in entries) {
+      if (entry is! Map) continue;
+      final babyId = entry['babyId'];
+      final data = entry['data'];
+      if (babyId is! String || data is! String) continue;
+      // Base64 is 4 characters for 3 bytes: refuse an oversized entry
+      // before decoding it.
+      if (data.length > (maxBackupPhotoBytes + 2) ~/ 3 * 4) continue;
+      final Uint8List bytes;
+      try {
+        bytes = base64Decode(data);
+      } on FormatException {
+        continue;
+      }
+      if (bytes.isEmpty || bytes.length > maxBackupPhotoBytes) continue;
+      final path =
+          await photos.save(bytes, safePhotoExtension(entry['extension']));
+      if (path != null) saved[babyId] = path;
+    }
+    return saved;
+  }
+
+  Future<void> _restoreRows(
+    Map<String, dynamic> tables,
+    Map<String, String> restoredPhotos,
+  ) async {
+    await _db.transaction(() async {
+      // Wipe in reverse FK order to avoid constraint violations.
+      await _db.delete(_db.handoffNotes).go();
+      await _db.delete(_db.vaccineRecords).go();
+      await _db.delete(_db.medicineLogs).go();
+      await _db.delete(_db.growthRecords).go();
+      await _db.delete(_db.diaperLogs).go();
+      await _db.delete(_db.sleepLogs).go();
+      await _db.delete(_db.feedingLogs).go();
+      await _db.delete(_db.babies).go();
+
+      // Insert in FK order: babies first, then child tables.
+      for (final row in _jsonList(tables, 'babies')) {
+        await _db.into(_db.babies).insert(
+              BabiesCompanion.insert(
+                id: row['id'] as String,
+                name: row['name'] as String,
+                dateOfBirth: _dateTime(row['dateOfBirth']),
+                gender: Value(row['gender'] as String?),
+                photoPath: Value(restoredPhotos[row['id']] ??
+                    row['photoPath'] as String?),
+                isActive: Value(row['isActive'] as bool? ?? true),
+                createdAt: _dateTime(row['createdAt']),
+                modifiedAt: _dateTime(row['modifiedAt']),
+              ),
+            );
+      }
+
+      for (final row in _jsonList(tables, 'feedingLogs')) {
+        await _db.into(_db.feedingLogs).insert(
+              FeedingLogsCompanion.insert(
+                id: row['id'] as String,
+                babyId: row['babyId'] as String,
+                type: row['type'] as String,
+                startTime: _dateTime(row['startTime']),
+                endTime: Value(_dateTimeOrNull(row['endTime'])),
+                durationMinutes: Value(row['durationMinutes'] as int?),
+                side: Value(row['side'] as String?),
+                amountMl: Value((row['amountMl'] as num?)?.toDouble()),
+                amountOz: Value((row['amountOz'] as num?)?.toDouble()),
+                notes: Value(row['notes'] as String?),
+                createdAt: _dateTime(row['createdAt']),
+                modifiedAt: _dateTime(row['modifiedAt']),
+              ),
+            );
+      }
+
+      for (final row in _jsonList(tables, 'sleepLogs')) {
+        await _db.into(_db.sleepLogs).insert(
+              SleepLogsCompanion.insert(
+                id: row['id'] as String,
+                babyId: row['babyId'] as String,
+                startTime: _dateTime(row['startTime']),
+                endTime: Value(_dateTimeOrNull(row['endTime'])),
+                durationMinutes: Value(row['durationMinutes'] as int?),
+                type: row['type'] as String,
+                location: Value(row['location'] as String?),
+                notes: Value(row['notes'] as String?),
+                createdAt: _dateTime(row['createdAt']),
+                modifiedAt: _dateTime(row['modifiedAt']),
+              ),
+            );
+      }
+
+      for (final row in _jsonList(tables, 'diaperLogs')) {
+        await _db.into(_db.diaperLogs).insert(
+              DiaperLogsCompanion.insert(
+                id: row['id'] as String,
+                babyId: row['babyId'] as String,
+                time: _dateTime(row['time']),
+                type: row['type'] as String,
+                color: Value(row['color'] as String?),
+                notes: Value(row['notes'] as String?),
+                createdAt: _dateTime(row['createdAt']),
+                modifiedAt: _dateTime(row['modifiedAt']),
+              ),
+            );
+      }
+
+      for (final row in _jsonList(tables, 'growthRecords')) {
+        await _db.into(_db.growthRecords).insert(
+              GrowthRecordsCompanion.insert(
+                id: row['id'] as String,
+                babyId: row['babyId'] as String,
+                measuredAt: _dateTime(row['measuredAt']),
+                weightKg: Value((row['weightKg'] as num?)?.toDouble()),
+                heightCm: Value((row['heightCm'] as num?)?.toDouble()),
+                headCircumferenceCm:
+                    Value((row['headCircumferenceCm'] as num?)?.toDouble()),
+                notes: Value(row['notes'] as String?),
+                createdAt: _dateTime(row['createdAt']),
+                modifiedAt: _dateTime(row['modifiedAt']),
+              ),
+            );
+      }
+
+      for (final row in _jsonList(tables, 'medicineLogs')) {
+        await _db.into(_db.medicineLogs).insert(
+              MedicineLogsCompanion.insert(
+                id: row['id'] as String,
+                babyId: row['babyId'] as String,
+                medicineName: row['medicineName'] as String,
+                dosage: Value((row['dosage'] as num?)?.toDouble()),
+                dosageUnit: Value(row['dosageUnit'] as String?),
+                administeredAt: _dateTime(row['administeredAt']),
+                notes: Value(row['notes'] as String?),
+                createdAt: _dateTime(row['createdAt']),
+                modifiedAt: _dateTime(row['modifiedAt']),
+              ),
+            );
+      }
+
+      for (final row in _jsonList(tables, 'vaccineRecords')) {
+        await _db.into(_db.vaccineRecords).insert(
+              VaccineRecordsCompanion.insert(
+                id: row['id'] as String,
+                babyId: row['babyId'] as String,
+                vaccineName: row['vaccineName'] as String,
+                doseNumber: Value(row['doseNumber'] as int?),
+                scheduledDate: Value(_dateTimeOrNull(row['scheduledDate'])),
+                administeredDate:
+                    Value(_dateTimeOrNull(row['administeredDate'])),
+                provider: Value(row['provider'] as String?),
+                notes: Value(row['notes'] as String?),
+                createdAt: _dateTime(row['createdAt']),
+                modifiedAt: _dateTime(row['modifiedAt']),
+              ),
+            );
+      }
+
+      for (final row in _jsonList(tables, 'handoffNotes')) {
+        await _db.into(_db.handoffNotes).insert(
+              HandoffNotesCompanion.insert(
+                id: row['id'] as String,
+                babyId: row['babyId'] as String,
+                body: row['body'] as String,
+                author: Value(row['author'] as String?),
+                writtenAt: _dateTime(row['writtenAt']),
+              ),
+            );
+      }
+    });
+  }
+
+  List<Map<String, dynamic>> _jsonList(
+    Map<String, dynamic> tables,
+    String key,
+  ) {
+    final list = tables[key] as List<dynamic>?;
+    if (list == null) return const [];
+    return list.cast<Map<String, dynamic>>();
+  }
+
+  /// Drift's default serializer encodes DateTime as Unix milliseconds (int).
+  DateTime _dateTime(dynamic value) {
+    if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+    if (value is String) return DateTime.parse(value);
+    throw FormatException('Cannot parse DateTime from: $value');
+  }
+
+  DateTime? _dateTimeOrNull(dynamic value) {
+    if (value == null) return null;
+    return _dateTime(value);
+  }
+}
+
+/// A restore was refused because household sync is on (ADR-0007).
+class RestoreWhileSyncingException implements Exception {
+  const RestoreWhileSyncingException();
+
+  @override
+  String toString() =>
+      'Restoring a backup is off while sync is on. Forget this phone in '
+      'Settings > Sync with another phone first.';
+}

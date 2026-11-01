@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The same rule as data_extraction_rules.xml, for phones older than Android 12
+  (android:fullBackupContent). The key store file stays out of Google backup.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+</full-backup-content>
