@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android backup is the phone owner's choice (they switch it in Android
+     settings), so the decision journal (app_flutter/reckon.sqlite) rides along
+     with Google backup and device-to-device transfer. Held back, for reasons
+     of their own:
+       - FlutterSecureStorage: the recovery words, the Anthropic key, the
+         household phrase and party keys. Their wrapping key lives in the
+         Android Keystore and cannot move to another phone, so a copy would be
+         unreadable there and only add a place for keys to sit.
+       - the model files: gigabytes of public weights, far past Auto Backup's
+         25 MB limit (going over stops the whole backup), and they download
+         again on demand.
+     The encrypted .ohbk export stays the private backup. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+        <exclude domain="sharedpref" path="FlutterSecureStorageKey.xml"/>
+        <exclude domain="root" path="app_flutter/qwen25-0-5b-it-q8.task"/>
+        <exclude domain="root" path="app_flutter/qwen25-0-5b-it-q8.task.part"/>
+        <exclude domain="root" path="app_flutter/qwen25-1-5b-it-int8.task"/>
+        <exclude domain="root" path="app_flutter/qwen25-1-5b-it-int8.task.part"/>
+        <exclude domain="root" path="app_flutter/phi4-mini-it-int8.task"/>
+        <exclude domain="root" path="app_flutter/phi4-mini-it-int8.task.part"/>
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+        <exclude domain="sharedpref" path="FlutterSecureStorageKey.xml"/>
+        <exclude domain="root" path="app_flutter/qwen25-0-5b-it-q8.task"/>
+        <exclude domain="root" path="app_flutter/qwen25-0-5b-it-q8.task.part"/>
+        <exclude domain="root" path="app_flutter/qwen25-1-5b-it-int8.task"/>
+        <exclude domain="root" path="app_flutter/qwen25-1-5b-it-int8.task.part"/>
+        <exclude domain="root" path="app_flutter/phi4-mini-it-int8.task"/>
+        <exclude domain="root" path="app_flutter/phi4-mini-it-int8.task.part"/>
+    </device-transfer>
+</data-extraction-rules>

@@ -1,0 +1,393 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:openhearth_design/openhearth_design.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:share_plus/share_plus.dart';
+
+import '../../../shared/widgets/oh_button.dart';
+import '../../../shared/widgets/oh_card.dart';
+import '../../../shared/widgets/section_header.dart';
+import '../data/party_providers.dart';
+import '../domain/entities/party.dart';
+import '../domain/entities/party_result.dart';
+import 'party_host_action.dart';
+import '../sync/party_sync_providers.dart';
+
+/// Live tally for a party. Recomputed on demand from on-device ballots. Offers
+/// the pass-the-phone loop (add another voter), closing voting, sharing a text
+/// summary, and handing a stuck group off into a full Reckon case.
+///
+/// For a shared/joined party this screen is also where remote votes arrive: it
+/// pulls from the relay when opened, every few seconds while open, and on
+/// demand via the refresh button. Pull failures are silent by design — the
+/// local tally stands until the relay is reachable again (local-first).
+class PartyResultScreen extends ConsumerStatefulWidget {
+  const PartyResultScreen({super.key, required this.partyId});
+  final String partyId;
+
+  @override
+  ConsumerState<PartyResultScreen> createState() => _PartyResultScreenState();
+}
+
+class _PartyResultScreenState extends ConsumerState<PartyResultScreen> {
+  static const _autoPullEvery = Duration(seconds: 5);
+  Timer? _autoPull;
+
+  @override
+  void initState() {
+    super.initState();
+    _startPullingIfSynced();
+  }
+
+  @override
+  void dispose() {
+    _autoPull?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _startPullingIfSynced() async {
+    final synced =
+        await ref.read(partySyncServiceProvider).isSynced(widget.partyId);
+    if (!synced || !mounted) return;
+    await _pull();
+    // Re-check after the await: if the user backed out while the first pull
+    // was in flight, dispose() has already run and a timer created now
+    // would tick (and burn network) forever with nobody to cancel it.
+    if (!mounted) return;
+    _autoPull = Timer.periodic(_autoPullEvery, (_) => _pull());
+  }
+
+  Future<void> _pull() async {
+    try {
+      await ref.read(partySyncServiceProvider).pull(widget.partyId);
+    } catch (_) {
+      return; // Offline or the host is gone — the local tally stands.
+    }
+    if (!mounted) return;
+    ref.invalidate(partyProvider(widget.partyId));
+    ref.invalidate(partyResultProvider(widget.partyId));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final partyAsync = ref.watch(partyProvider(widget.partyId));
+    final resultAsync = ref.watch(partyResultProvider(widget.partyId));
+    final isSynced =
+        ref.watch(partyIsSyncedProvider(widget.partyId)).value ?? false;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Result'),
+        actions: [
+          if (isSynced)
+            OhBarActions(children: [
+              OhBarAction(
+                icon: Icons.refresh,
+                label: 'Refresh',
+                onPressed: _pull,
+              ),
+            ]),
+        ],
+      ),
+      body: OhPage(
+        padding: EdgeInsets.zero,
+        child: partyAsync.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, st) => OhErrorState.fromError(e,
+              stackTrace: st, title: "Couldn’t load this vote"),
+          data: (party) {
+            if (party == null) {
+              return const Center(child: Text('This vote no longer exists.'));
+            }
+            final labels = {for (final o in party.options) o.id: o.label};
+            return resultAsync.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (e, st) => OhErrorState.fromError(e,
+              stackTrace: st, title: "Couldn’t count the votes"),
+              data: (result) => ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  Text(party.title,
+                      style: Theme.of(context).textTheme.headlineMedium),
+                  const SizedBox(height: 16),
+                  // Considered mode: while voting is open, nobody — host
+                  // included — sees a running score. Blind first; closing is
+                  // the mutual reveal.
+                  if (party.resultsSealed)
+                    _SealedView(ballotCount: _ballotCount(result))
+                  else if (result is ApprovalResult)
+                    _ApprovalView(result: result, labels: labels)
+                  else if (result is RankedResult)
+                    _RankedView(result: result, labels: labels),
+                  const SizedBox(height: 24),
+                  _Actions(party: party, labels: labels, result: result),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+int _ballotCount(Object result) => switch (result) {
+      ApprovalResult r => r.ballotCount,
+      RankedResult r => r.ballotCount,
+      _ => 0,
+    };
+
+/// What a considered party shows while open: who-has-voted count only —
+/// deliberately no tallies, no per-option anything. (A client-side courtesy,
+/// not cryptography: every key holder could decrypt the ballots. The UI keeps
+/// the household honest; see Party.resultsSealed.)
+class _SealedView extends StatelessWidget {
+  const _SealedView({required this.ballotCount});
+  final int ballotCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return OHCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.lock_outline, size: 18),
+              const SizedBox(width: 8),
+              Text('Results sealed', style: textTheme.titleMedium),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '$ballotCount ${ballotCount == 1 ? 'vote' : 'votes'} in. '
+            'Everyone votes blind; when the host closes voting, the result '
+            'is revealed to all of you at once.',
+            style: textTheme.bodyMedium,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ApprovalView extends StatelessWidget {
+  const _ApprovalView({required this.result, required this.labels});
+  final ApprovalResult result;
+  final Map<String, String> labels;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('${result.ballotCount} vote(s) · approval',
+            style: textTheme.bodySmall),
+        if (result.isContested)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text('Close call: the group is split.',
+                style: textTheme.bodySmall),
+          ),
+        const SizedBox(height: 12),
+        for (final t in result.tallies)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: OHCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          labels[t.optionId] ?? t.optionId,
+                          style: textTheme.titleMedium?.copyWith(
+                            fontWeight: result.winnerIds.contains(t.optionId)
+                                ? FontWeight.w700
+                                : FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                      Text('${t.approvals} · ${t.percentage.round()}%',
+                          style: textTheme.bodySmall),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: (t.percentage / 100).clamp(0.0, 1.0),
+                      minHeight: 6,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _RankedView extends StatelessWidget {
+  const _RankedView({required this.result, required this.labels});
+  final RankedResult result;
+  final Map<String, String> labels;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('${result.ballotCount} vote(s) · ranked (instant-runoff)',
+            style: textTheme.bodySmall),
+        const SizedBox(height: 12),
+        OHCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Winner', style: textTheme.bodySmall),
+              const SizedBox(height: 4),
+              Text(
+                result.winnerId == null
+                    ? 'No votes yet'
+                    : labels[result.winnerId] ?? result.winnerId!,
+                style: textTheme.titleLarge,
+              ),
+              if (result.isContested)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text('Took several rounds: a divided group.',
+                      style: textTheme.bodySmall),
+                ),
+            ],
+          ),
+        ),
+        if (result.rounds.length > 1) const SectionHeader(label: 'How it played out'),
+        for (final round in result.rounds)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 28,
+                  child: Text('R${round.roundNumber}',
+                      style: textTheme.labelMedium),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        [
+                          for (final t in round.tallies)
+                            '${labels[t.optionId] ?? t.optionId} ${t.votes}'
+                        ].join(' · '),
+                        style: textTheme.bodyMedium,
+                      ),
+                      if (round.eliminatedOptionId != null)
+                        Text(
+                          'eliminated: ${labels[round.eliminatedOptionId] ?? round.eliminatedOptionId}',
+                          style: textTheme.bodySmall,
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _Actions extends ConsumerWidget {
+  const _Actions({required this.party, required this.labels, required this.result});
+  final Party party;
+  final Map<String, String> labels;
+  final Object result;
+
+  String _summary() {
+    final buf = StringBuffer('${party.title}\n');
+    if (result is ApprovalResult) {
+      final r = result as ApprovalResult;
+      for (final t in r.tallies) {
+        buf.writeln(
+            '• ${labels[t.optionId] ?? t.optionId}: ${t.approvals} (${t.percentage.round()}%)');
+      }
+    } else if (result is RankedResult) {
+      final r = result as RankedResult;
+      final w = r.winnerId;
+      buf.writeln('Winner: ${w == null ? '—' : labels[w] ?? w}');
+    }
+    buf.write('\nDecided together with Reckon.');
+    return buf.toString();
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (!party.closed)
+          OHButton(
+            label: 'Pass to next voter',
+            expanded: true,
+            icon: Icons.how_to_vote,
+            onPressed: () => context.go('/party/${party.id}/vote'),
+          ),
+        if (!party.closed) ...[
+          const SizedBox(height: 12),
+          PartyHostAction(partyId: party.id),
+        ],
+        const SizedBox(height: 12),
+        // Sharing a sealed result would leak it — the share affordance only
+        // exists once the tally is visible.
+        if (!party.resultsSealed) ...[
+          OHButton(
+            label: 'Share result',
+            style: OHButtonStyle.secondary,
+            expanded: true,
+            icon: Icons.share,
+            onPressed: () =>
+                SharePlus.instance.share(ShareParams(text: _summary())),
+          ),
+          const SizedBox(height: 12),
+        ],
+        if (!party.closed)
+          OHButton(
+            label: party.resultsSealed
+                ? 'Close voting and reveal'
+                : 'Close voting',
+            style: OHButtonStyle.text,
+            expanded: true,
+            onPressed: () async {
+              // closeSynced closes locally first, then mirrors the close to
+              // the relay when this party has a sync key (no-op otherwise) —
+              // so remote voters see voting end instead of a silent void.
+              try {
+                await ref.read(partySyncServiceProvider).closeSynced(party.id);
+              } catch (_) {
+                // Relay unreachable: the local close already took effect.
+              }
+              ref.invalidate(partyProvider(party.id));
+              ref.invalidate(partyResultProvider(party.id));
+            },
+          ),
+        OHButton(
+          label: 'Turn this into a Reckon decision',
+          style: OHButtonStyle.text,
+          expanded: true,
+          onPressed: () => context.go('/intake'),
+        ),
+      ],
+    );
+  }
+}

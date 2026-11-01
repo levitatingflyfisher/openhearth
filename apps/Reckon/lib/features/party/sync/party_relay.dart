@@ -1,0 +1,156 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
+
+/// A snapshot of a party as the relay holds it: opaque (encrypted) blobs only.
+class RelaySnapshot {
+  const RelaySnapshot({
+    required this.party,
+    required this.closed,
+    required this.ballots,
+  });
+  final Uint8List party;
+  final bool closed;
+  final Map<String, Uint8List> ballots;
+}
+
+/// Client side of the ReckonParty relay protocol. Moves opaque, already-encrypted
+/// bytes — it has no knowledge of decision content. Implemented by [HttpPartyRelay]
+/// (real) and [InMemoryPartyRelay] (tests).
+abstract class PartyRelay {
+  Future<void> publishParty(String partyId, Uint8List blob);
+  Future<RelaySnapshot?> fetchParty(String partyId);
+  Future<void> submitBallot(String partyId, String ballotId, Uint8List blob);
+  Future<void> close(String partyId);
+}
+
+/// Talks to a self-hosted relay over HTTP (see `relay/`).
+class HttpPartyRelay implements PartyRelay {
+  HttpPartyRelay({required String baseUrl, Dio? dio})
+      : _base = baseUrl.endsWith('/')
+            ? baseUrl.substring(0, baseUrl.length - 1)
+            : baseUrl,
+        _dio = dio ?? Dio();
+
+  final String _base;
+  final Dio _dio;
+
+  /// Cap on a relay response body — the relay stores small encrypted blobs, so
+  /// anything larger is a hostile/oversized response, not a real party.
+  static const int _maxResponseBytes = 1024 * 1024; // 1 MB
+
+  static final _bytes = Options(
+    responseType: ResponseType.bytes,
+    headers: {'content-type': 'application/octet-stream'},
+  );
+
+  @override
+  Future<void> publishParty(String partyId, Uint8List blob) async {
+    await _dio.put<void>('$_base/parties/$partyId',
+        data: Stream.value(blob), options: _bytes);
+  }
+
+  @override
+  Future<RelaySnapshot?> fetchParty(String partyId) async {
+    try {
+      // Stream the body under a hard cap. The join link controls the relay
+      // host, so its response is untrusted — a hostile/oversized body (with a
+      // missing or lying Content-Length) must not be buffered into memory.
+      final res = await _dio.get<ResponseBody>(
+        '$_base/parties/$partyId',
+        options: Options(responseType: ResponseType.stream),
+      );
+      final bytes = <int>[];
+      await for (final chunk in res.data!.stream) {
+        bytes.addAll(chunk);
+        if (bytes.length > _maxResponseBytes) {
+          throw DioException(
+            requestOptions: res.requestOptions,
+            message: 'Relay response exceeds the $_maxResponseBytes-byte cap',
+          );
+        }
+      }
+      // The body is untrusted (see above): decode + shape-check under a
+      // guard, so a corrupt or hostile response surfaces as the flow's
+      // normal transport failure (DioException) instead of leaking a raw
+      // FormatException/TypeError. Same trust-boundary stance as
+      // ChannelPartyRelay, which drops frames it cannot decode.
+      try {
+        final json = jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+        return RelaySnapshot(
+          party: base64.decode(json['party'] as String),
+          closed: (json['closed'] as bool?) ?? false,
+          ballots: {
+            for (final e in (json['ballots'] as Map).entries)
+              e.key as String: base64.decode(e.value as String),
+          },
+        );
+      } catch (e) {
+        throw DioException(
+          requestOptions: res.requestOptions,
+          type: DioExceptionType.badResponse,
+          error: e,
+          message: 'Malformed relay response for party $partyId',
+        );
+      }
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 404) return null;
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> submitBallot(
+      String partyId, String ballotId, Uint8List blob) async {
+    await _dio.put<void>('$_base/parties/$partyId/ballots/$ballotId',
+        data: Stream.value(blob), options: _bytes);
+  }
+
+  @override
+  Future<void> close(String partyId) async {
+    await _dio.post<void>('$_base/parties/$partyId/close');
+  }
+}
+
+/// In-memory relay mirroring the server's semantics, for tests.
+class InMemoryPartyRelay implements PartyRelay {
+  final Map<String, Uint8List> _parties = {};
+  final Map<String, bool> _closed = {};
+  final Map<String, Map<String, Uint8List>> _ballots = {};
+
+  @override
+  Future<void> publishParty(String partyId, Uint8List blob) async {
+    _parties[partyId] = blob;
+    _closed.putIfAbsent(partyId, () => false);
+    _ballots.putIfAbsent(partyId, () => {});
+  }
+
+  @override
+  Future<RelaySnapshot?> fetchParty(String partyId) async {
+    final party = _parties[partyId];
+    if (party == null) return null;
+    return RelaySnapshot(
+      party: party,
+      closed: _closed[partyId] ?? false,
+      ballots: Map.of(_ballots[partyId] ?? {}),
+    );
+  }
+
+  @override
+  Future<void> submitBallot(
+      String partyId, String ballotId, Uint8List blob) async {
+    if (!_parties.containsKey(partyId)) {
+      throw StateError('unknown party');
+    }
+    if (_closed[partyId] ?? false) throw StateError('party closed');
+    (_ballots[partyId] ??= {})[ballotId] = blob;
+  }
+
+  @override
+  Future<void> close(String partyId) async => _closed[partyId] = true;
+
+  /// Test helper: the raw stored bytes for a ballot (to assert it's ciphertext).
+  Uint8List? rawBallot(String partyId, String ballotId) =>
+      _ballots[partyId]?[ballotId];
+}

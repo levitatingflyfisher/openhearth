@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Reckon
+
+      # Every path dep in pubspec.yaml resolves against a sibling of the
+      # Reckon/ checkout (eloEngine precedent, SANCTUARY-BRIEF §3): the
+      # sanctuary pair under packages/, the canonical ohStyle design
+      # package, and the fleet-conformance test harness.
+      - name: Clone the sibling path-dep packages
+        run: |
+          git clone --depth 1 https://github.com/levitatingflyfisher/sanctuaryAuthCore packages/sanctuary_auth_core
+          git clone --depth 1 https://github.com/levitatingflyfisher/sanctuaryBackupUi packages/sanctuary_backup_ui
+          git clone --depth 1 https://github.com/levitatingflyfisher/ohStyle ohStyle
+          git clone --depth 1 https://github.com/levitatingflyfisher/ohFleetConformance packages/oh_fleet_conformance
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.7'
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        working-directory: Reckon
+        run: flutter pub get
+
+      - name: Run code generation
+        working-directory: Reckon
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Run tests
+        working-directory: Reckon
+        run: flutter test
+
+  build-and-release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Reckon
+
+      # Every path dep in pubspec.yaml resolves against a sibling of the
+      # Reckon/ checkout (eloEngine precedent, SANCTUARY-BRIEF §3): the
+      # sanctuary pair under packages/, the canonical ohStyle design
+      # package, and the fleet-conformance test harness.
+      - name: Clone the sibling path-dep packages
+        run: |
+          git clone --depth 1 https://github.com/levitatingflyfisher/sanctuaryAuthCore packages/sanctuary_auth_core
+          git clone --depth 1 https://github.com/levitatingflyfisher/sanctuaryBackupUi packages/sanctuary_backup_ui
+          git clone --depth 1 https://github.com/levitatingflyfisher/ohStyle ohStyle
+          git clone --depth 1 https://github.com/levitatingflyfisher/ohFleetConformance packages/oh_fleet_conformance
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.7'
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        working-directory: Reckon
+        run: flutter pub get
+
+      - name: Run code generation
+        working-directory: Reckon
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Build split APKs
+        working-directory: Reckon
+        run: flutter build apk --split-per-abi --release
+
+      - name: Build AAB
+        working-directory: Reckon
+        run: flutter build appbundle --release
+
+      - name: Generate SHA256 checksums
+        working-directory: Reckon/build/app/outputs/flutter-apk
+        run: |
+          for f in *.apk; do
+            sha256sum "$f" > "${f}.sha256"
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Reckon/build/app/outputs/flutter-apk/*.apk
+            Reckon/build/app/outputs/flutter-apk/*.sha256
+            Reckon/build/app/outputs/bundle/release/*.aab
+          generate_release_notes: true
+          draft: true

@@ -1,0 +1,109 @@
+# Changelog
+
+All notable changes to Reckon will be documented in this file.
+
+## [Unreleased]
+
+### Changed (on-device model, 2026-11)
+- The on-device model sits behind Reckon's own interface (ADR-0010). Nothing on
+  screen changes: same models, same context size, same GPU preference.
+- A missing, empty or wrong-format model file now fails with a plain typed error
+  before the native runtime sees it.
+- Every chat with the model is closed after use, also when the reply fails.
+- flutter_gemma is discontinued; the move to flutter_edge_ai waits on Flutter 3.44.
+
+### Changed (riverpod 3, 2026-11)
+- Moved to riverpod 3. Nothing changes on screen: a failed read still shows
+  its error once and is not retried on its own, the reveal still refuses to
+  open without the decision it reveals, and a restore still refreshes every
+  open screen. Pub moved drift and drift_dev from 2.34 to 2.31, the newest
+  that fits beside riverpod 3 on the current Flutter; the database file is
+  unchanged.
+
+### Changed (fleet rollout, 2026-09)
+- Words on screen: decision (not case), weigh in (not re-poll), the
+  forecasters (not the duel), outside bots (not bounty), group vote (not
+  party), and Settings says "Account: None" instead of "Ghost". Learn is
+  called Learn on its tab, its title bar and everywhere else.
+- The theme follows the phone by default; Light, Dark and Late night are
+  one tap away in each tab's top bar. Old Daytime/Evening/Late night picks
+  carry over (Daytime stays Light).
+- Every screen's content is capped at 640 dp and centred on wide screens.
+- Failures show a plain sentence with the details behind a tap, never the
+  raw exception.
+- Deleting a forecaster offers Undo that stays until you act; deleting a
+  model file asks first, naming the act.
+- Section labels are 13 px, sentence case, at 4.5:1 or better in every
+  theme.
+- The re-poll, check-in and group-vote screens keep their main button on
+  screen at large text; Home's group-vote door is a worded button.
+- Web: a decision can be written down by hand; the outside view and the
+  reveal say plainly that they need the on-device model.
+- Backup: on web the recovery words are stored under Reckon's own keys;
+  Home shows a dismissible line until backup is set up.
+- Fonts come from openhearth_design; the app ships no font files.
+- Typography: no spaced em dashes, curly apostrophes and quotes.
+
+### Added
+- Fleet conformance suite (`test/fleet_conformance_test.dart` via the
+  shared `oh_fleet_conformance` package): Reckon's recorded posture —
+  tokens style tier, exact four-permission Android surface, recorded
+  tighter analyzer override, startup maintenance — plus committed size
+  budgets in `budgets.json` (gzipped `main.dart.js` and arm64 APK,
+  measured x 1.05).
+- Snapshot vault ("Previous backups" on the backup settings section):
+  every encrypted export and every restore leaves a stamped on-device
+  snapshot (keep-10, pinnable) you can restore, pin or delete.
+- Mandatory pre-restore snapshot: a restore refuses to run unless the
+  current data was snapshotted (and the snapshot verified) first —
+  restoring is now reversible.
+- Preview before restore: the confirm dialog shows the backup's age and
+  per-table row counts next to what's on the device now.
+- Encrypted exports verify themselves by read-back before reporting
+  success, and the backup envelope now carries a `createdAt` stamp —
+  added additively to the shipped flat shape, so older backups still
+  restore (their age falls back to the original `generatedAt` stamp)
+  and older app versions still read new backups.
+- Silent freshness snapshot on app boot when the newest one is older
+  than 7 days.
+- Plain-JSON export tile alongside the encrypted backup.
+
+### Fixed
+- A corrupt or hostile relay response to a party fetch (malformed JSON,
+  wrong shape, invalid base64 blobs) now surfaces as the sync flow's
+  normal transport failure instead of an unhandled decode error — the
+  relay body is untrusted input (the join link picks the relay host).
+- The same guard for the peer-to-peer path: a malformed peer snapshot
+  over a LAN/Nearby/WebRTC channel (non-map snapshot, wrong field types,
+  invalid base64 blobs) now surfaces as the channel flow's normal
+  `StateError` instead of leaking a raw `TypeError`/`FormatException` —
+  the peer device controls every byte of that snapshot.
+
+### Changed
+- De-forked the design package: the in-repo `packages/openhearth_design`
+  reconstruction (whose every token had silently diverged from the shared
+  `ohStyle` package) is deleted. Reckon's shipped look is unchanged —
+  blessed as app identity in `lib/shared/theme/` (`ReckonTheme`,
+  `ReckonAccents` ember hues, `ReckonPalette`/`ReckonRadii`/
+  `ReckonTypography`), pinned by the golden sweeps. The canonical
+  `../ohStyle/openhearth_design` sibling is now the declared dependency
+  for future deliberate convergence.
+- Backup envelope validation now goes through the shared
+  `sanctuary_backup_ui` v0.2.0 helper; preview and restore share the
+  full payload parse — every case is parsed exactly as restore would
+  parse it (not just shape-checked), so the preview can never accept a
+  file the restore would then reject.
+
+### Removed
+- The unused `permission_handler` dependency. The notification-permission
+  prompt goes through `flutter_local_notifications`'
+  `requestNotificationsPermission()`; nothing imported the package.
+- Unused flutter_gemma native families from the Android APK (image
+  generator, vision-tasks base, gemma/gecko embedders, text chunker,
+  RAG sqlite vector store — Reckon does text inference only, which loads
+  just `libllm_inference_engine_jni.so`/`liblitertlm_jni.so`; verified
+  against the plugin's 0.13.2 Kotlin source). Expected arm64 APK drop:
+  ~85 MiB (~156 MB → ~70 MB). Excludes are a reversible `packaging`
+  block in `android/app/build.gradle.kts`. On-device verification of a
+  rebuilt APK (download a model, run a duel) is still pending — please
+  smoke-test text inference on hardware before shipping this build.

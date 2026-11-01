@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pre-Android-12 Auto Backup rules. Same holds as data_extraction_rules.xml:
+     the database is backed up; secure storage (keys and recovery words) and the
+     large model files are not. See that file for why. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+    <exclude domain="sharedpref" path="FlutterSecureStorageKey.xml"/>
+    <exclude domain="root" path="app_flutter/qwen25-0-5b-it-q8.task"/>
+    <exclude domain="root" path="app_flutter/qwen25-0-5b-it-q8.task.part"/>
+    <exclude domain="root" path="app_flutter/qwen25-1-5b-it-int8.task"/>
+    <exclude domain="root" path="app_flutter/qwen25-1-5b-it-int8.task.part"/>
+    <exclude domain="root" path="app_flutter/phi4-mini-it-int8.task"/>
+    <exclude domain="root" path="app_flutter/phi4-mini-it-int8.task.part"/>
+</full-backup-content>
