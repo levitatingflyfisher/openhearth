@@ -1,0 +1,450 @@
+import 'package:flutter/material.dart';
+import 'package:openhearth_design/openhearth_design.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:go_router/go_router.dart';
+import 'package:uuid/uuid.dart';
+
+import '../../../../core/errors/result.dart';
+import '../../../../core/providers/profile_providers.dart';
+import '../../../move/move_page.dart';
+import '../../../profiles/domain/entities/profile.dart';
+import '../../../profiles/presentation/profile_ui_constants.dart';
+
+const _kOnboardingKey = 'onboarding_v1';
+
+/// Full-screen welcome shown on first launch.
+/// After tapping "Get Started" the key is written and the user lands
+/// on the dashboard. On every subsequent launch the router skips this screen.
+class OnboardingScreen extends ConsumerStatefulWidget {
+  const OnboardingScreen({super.key});
+
+  @override
+  ConsumerState<OnboardingScreen> createState() => _OnboardingScreenState();
+}
+
+class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
+  final _pageController = PageController();
+  int _page = 0;
+
+  // Profile setup state (page 1)
+  String _selectedEmoji = kDefaultProfileEmoji;
+  String _selectedColor = kDefaultProfileColor;
+  final TextEditingController _nameController = TextEditingController();
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  void _next() {
+    if (_page < 2) {
+      _pageController.nextPage(
+        duration: OhMotion.deliberate,
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  Future<void> _finish() async {
+    await const FlutterSecureStorage().write(
+      key: _kOnboardingKey,
+      value: 'complete',
+    );
+    if (mounted) context.go('/dashboard');
+  }
+
+  Future<void> _createProfileAndNext() async {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Please enter your name')));
+      return;
+    }
+    final now = DateTime.now();
+    final profile = Profile(
+      id: const Uuid().v4(),
+      name: name,
+      colorHex: _selectedColor,
+      avatarEmoji: _selectedEmoji,
+      isDefault: true,
+      createdAt: now,
+      modifiedAt: now,
+    );
+    final result = await ref
+        .read(profileRepositoryProvider)
+        .createProfile(profile);
+    if (!mounted) return;
+    switch (result) {
+      case Success(:final data):
+        await ref.read(activeProfileProvider.notifier).setActive(data);
+        if (mounted) _next();
+      case Err(:final error):
+        // The write failed — most likely the SQLite database never opened on
+        // this device (drift caches that first-open failure, so every later
+        // write throws too). Show the real error instead of a generic message,
+        // so a stuck user can report exactly what broke, and offer an explicit
+        // way past the profile step rather than trapping them on it.
+        await _showSaveFailedDialog(error.message);
+    }
+  }
+
+  Future<void> _showSaveFailedDialog(String message) async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text("Couldn’t save your profile"),
+        content: Text(
+          'Your device reported:\n\n$message\n\n'
+          'You can try again, or continue without a profile and add one later.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Try again'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(dialogContext).pop();
+              _next();
+            },
+            child: const Text('Continue without a profile'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showEmojiPicker() {
+    showModalBottomSheet<String>(
+      context: context,
+      builder: (_) => Padding(
+        padding: OhSpacing.insetMd,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Choose avatar',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 12),
+            GridView.builder(
+              shrinkWrap: true,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 6,
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+              ),
+              itemCount: kProfileEmojis.length,
+              itemBuilder: (_, index) {
+                final emoji = kProfileEmojis[index];
+                return GestureDetector(
+                  onTap: () => Navigator.of(context).pop(emoji),
+                  child: Center(
+                    child: ProfileAvatarIcon(emoji, size: 32),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    ).then((picked) {
+      if (picked != null && mounted) {
+        setState(() => _selectedEmoji = picked);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: OhPage(
+        padding: EdgeInsets.zero,
+        child: SafeArea(
+          child: PageView(
+            controller: _pageController,
+            physics: const NeverScrollableScrollPhysics(),
+            onPageChanged: (p) => setState(() => _page = p),
+            children: [
+              _WelcomePage(onNext: _next),
+              _buildProfileSetupPage(),
+              _FeaturesPage(onFinish: _finish),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProfileSetupPage() {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const SizedBox(height: 48),
+          Text(
+            "Who’s setting this up?",
+            style: tt.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 32),
+
+          // Large tappable avatar
+          GestureDetector(
+            onTap: _showEmojiPicker,
+            child: Container(
+              width: 96,
+              height: 96,
+              decoration: BoxDecoration(
+                color: profileColor(_selectedColor).withValues(alpha: 0.2),
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: profileColor(_selectedColor),
+                  width: 2,
+                ),
+              ),
+              child: Center(
+                child: ProfileAvatarIcon(
+                  _selectedEmoji,
+                  size: 52,
+                  color: profileColor(_selectedColor),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: OhSpacing.sm),
+          Text(
+            'Tap to change',
+            style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+          ),
+          const SizedBox(height: OhSpacing.lg),
+
+          // Name field
+          TextField(
+            controller: _nameController,
+            decoration: const InputDecoration(
+              hintText: 'Your name',
+              border: OutlineInputBorder(),
+            ),
+            textCapitalization: TextCapitalization.words,
+          ),
+          const SizedBox(height: OhSpacing.lg),
+
+          // Color swatches
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: kProfileColors.map((hex) {
+              final isSelected = hex == _selectedColor;
+              return GestureDetector(
+                onTap: () => setState(() => _selectedColor = hex),
+                child: CircleAvatar(
+                  radius: 20,
+                  backgroundColor: profileColor(hex),
+                  child: isSelected
+                      ? const Icon(Icons.check, color: Colors.white, size: 18)
+                      : null,
+                ),
+              );
+            }).toList(),
+          ),
+          const Spacer(),
+
+          // "That's me" button
+          FilledButton(
+            onPressed: _createProfileAndNext,
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(52),
+            ),
+            child: const Text("That’s me"),
+          ),
+          const SizedBox(height: 12),
+
+          // Skip button
+          TextButton(onPressed: _next, child: const Text('Skip')),
+          const SizedBox(height: 32),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Page 1: Welcome ───────────────────────────────────────────────────────────
+
+class _WelcomePage extends StatelessWidget {
+  final VoidCallback onNext;
+  const _WelcomePage({required this.onNext});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
+    // Scrolls when it must (the moved-here card, large text); when it fits,
+    // the spacers place it exactly as before.
+    return LayoutBuilder(
+      builder: (context, box) => SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: box.maxHeight),
+          child: IntrinsicHeight(child: _column(cs, tt)),
+        ),
+      ),
+    );
+  }
+
+  Widget _column(ColorScheme cs, TextTheme tt) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        // On the web, an empty browser at the new address offers the
+        // way back to the old one (OhMovedHereOffer).
+        const MovedHereOfferSlot(),
+        const Spacer(),
+        Container(
+          width: 100,
+          height: 100,
+          decoration: BoxDecoration(
+            color: cs.primaryContainer,
+            borderRadius: BorderRadius.circular(24),
+          ),
+          child: Icon(
+            Icons.home_work_outlined,
+            size: 56,
+            color: cs.onPrimaryContainer,
+          ),
+        ),
+        const SizedBox(height: 32),
+        Text(
+          'Still Life',
+          style: tt.headlineLarge?.copyWith(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          'Document what you own.\nKnow what it’s worth.',
+          style: tt.titleMedium?.copyWith(color: cs.onSurfaceVariant),
+          textAlign: TextAlign.center,
+        ),
+        const Spacer(),
+        FilledButton(
+          onPressed: onNext,
+          style: FilledButton.styleFrom(
+            minimumSize: const Size.fromHeight(52),
+          ),
+          child: const Text('Get Started'),
+        ),
+        const SizedBox(height: 32),
+      ],
+    );
+  }
+}
+
+// ── Page 3: Features ─────────────────────────────────────────────────────────
+
+class _FeaturesPage extends StatelessWidget {
+  final VoidCallback onFinish;
+  const _FeaturesPage({required this.onFinish});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
+    const features = [
+      (
+        Icons.inventory_2_outlined,
+        'Inventory',
+        'Catalog items with photos, receipts & serial numbers',
+      ),
+      (
+        Icons.bar_chart_outlined,
+        'Financial dashboard',
+        'Track total value, depreciation trends, and room breakdowns',
+      ),
+      (
+        Icons.shield_outlined,
+        'Insurance',
+        'Record policies and spot coverage gaps',
+      ),
+      (
+        Icons.build_outlined,
+        'Maintenance',
+        'Schedule tasks and get warranty expiry reminders',
+      ),
+      (
+        Icons.wifi_outlined,
+        'LAN sync',
+        'Sync across devices on your home Wi-Fi—no cloud required',
+      ),
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SizedBox(height: 32),
+          Text(
+            'Everything in one place',
+            style: tt.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: OhSpacing.sm),
+          Text(
+            'Your data stays on your device—no account needed.',
+            style: tt.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
+          ),
+          const SizedBox(height: 28),
+          ...features.map(
+            (f) => Padding(
+              padding: const EdgeInsets.only(bottom: 20),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(f.$1, color: cs.primary, size: 24),
+                  const SizedBox(width: OhSpacing.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          f.$2,
+                          style: tt.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          f.$3,
+                          style: tt.bodySmall?.copyWith(
+                            color: cs.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const Spacer(),
+          FilledButton(
+            onPressed: onFinish,
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(52),
+            ),
+            child: const Text('Let’s go'),
+          ),
+          const SizedBox(height: 32),
+        ],
+      ),
+    );
+  }
+}

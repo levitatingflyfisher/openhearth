@@ -1,0 +1,332 @@
+import 'package:drift/drift.dart';
+import 'package:uuid/uuid.dart';
+
+import '../../../../core/errors/failures.dart';
+import '../../../../core/errors/result.dart';
+import '../../../../core/sync/sync_stamp.dart';
+import '../../../../services/database/database.dart' as db;
+import '../../../../services/storage/photo_storage_service.dart';
+import '../../domain/entities/item.dart';
+import '../../domain/repositories/item_repository.dart';
+
+const _uuid = Uuid();
+
+/// Records a price history snapshot for [itemId] with [valueCents] and its
+/// provenance [source] ('manual' | 'llm_estimate' | ...).
+Future<void> _recordPrice(
+  db.AppDatabase database,
+  SyncStamp stamp,
+  String itemId,
+  int valueCents, {
+  String source = 'manual',
+}) {
+  return stamp.write((crdt) => database.priceHistoryDao.insertPriceEntry(
+    db.PriceHistoryEntriesCompanion.insert(
+      id: _uuid.v4(),
+      itemId: itemId,
+      priceCents: valueCents,
+      source: source,
+      recordedAt: DateTime.now(),
+    ),
+    crdt: crdt,
+  ));
+}
+
+class ItemRepositoryImpl implements ItemRepository {
+  final db.AppDatabase _db;
+
+  /// [photoStorage] is no longer used: a delete is soft and keeps the photo
+  /// files so it can be undone. The parameter stays so the many call sites
+  /// and test fakes need no churn.
+  ///
+  /// [stamp] gives every write its sync stamp (see [SyncStamp]).
+  ItemRepositoryImpl(
+    this._db,
+    PhotoStorageService photoStorage, {
+    SyncStamp stamp = SyncStamp.none,
+  }) : _stamp = stamp;
+
+  final SyncStamp _stamp;
+
+  @override
+  Stream<List<Item>> watchItems(ItemQuery query) {
+    return _db.itemDao
+        .watchAllItems(
+          roomId: query.roomId,
+          categoryId: query.categoryId,
+          containerId: query.containerId,
+          condition: query.condition?.label,
+          minValueCents: query.minValueCents,
+          maxValueCents: query.maxValueCents,
+          priceField: query.priceField.name,
+          addedAfter: query.addedAfter,
+          addedBefore: query.addedBefore,
+          hasPhoto: query.hasPhoto,
+          hasReceipt: query.hasReceipt,
+          hasBarcode: query.hasBarcode,
+          profileId: query.profileId,
+          sortBy: query.sortBy.name,
+          ascending: query.ascending,
+          limit: query.limit,
+          offset: query.offset,
+        )
+        .asyncMap(_enrichRows);
+  }
+
+  @override
+  Stream<Item?> watchItem(String id) {
+    final query = _db.select(_db.items)
+      ..where((t) => t.id.equals(id) & t.isDeleted.equals(false));
+    return query.watchSingleOrNull().asyncMap(
+      (row) async => row == null ? null : (await _enrichRows([row])).first,
+    );
+  }
+
+  @override
+  Future<Result<Item>> getItem(String id) async {
+    try {
+      final row = await _db.itemDao.getItemById(id);
+      if (row == null) {
+        return const Err(DatabaseFailure('Item not found'));
+      }
+      final enriched = await _enrichRows([row]);
+      return Success(enriched.first);
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to get item: $e'));
+    }
+  }
+
+  @override
+  Future<Result<Item>> createItem(
+    Item item, {
+    String priceSource = 'manual',
+  }) async {
+    try {
+      final now = DateTime.now();
+      final id = item.id.isEmpty ? _uuid.v4() : item.id;
+      final companion = db.ItemsCompanion.insert(
+        id: id,
+        name: item.name,
+        description: Value(item.description),
+        categoryId: item.categoryId,
+        roomId: item.roomId,
+        purchaseDate: Value(item.purchaseDate),
+        purchasePriceCents: Value(item.purchasePriceCents),
+        currentValueCents: Value(item.currentValueCents),
+        replacementCostCents: Value(item.replacementCostCents),
+        condition: Value(item.condition?.label),
+        serialNumber: Value(item.serialNumber),
+        warrantyExpiration: Value(item.warrantyExpiration),
+        containerId: Value(item.containerId),
+        creatorProfileId: Value(item.creatorProfileId),
+        ownerProfileId: Value(item.ownerProfileId),
+        brand: Value(item.brand),
+        model: Value(item.model),
+        asin: Value(item.asin),
+        receiptId: Value(item.receiptId),
+        barcode: Value(item.barcode),
+        storeUrl: Value(item.storeUrl),
+        notes: Value(item.notes),
+        isInsured: Value(item.isInsured),
+        quantity: Value(item.quantity),
+        quantityUnit: Value(item.quantityUnit),
+        lowStockThreshold: Value(item.lowStockThreshold),
+        createdAt: now,
+        modifiedAt: now,
+      );
+      await _stamp.write((c) => _db.itemDao.insertItem(companion, crdt: c));
+      if (item.currentValueCents != null) {
+        await _recordPrice(
+          _db,
+          _stamp,
+          id,
+          item.currentValueCents!,
+          source: priceSource,
+        );
+      }
+      return getItem(id);
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to create item: $e'));
+    }
+  }
+
+  @override
+  Future<Result<Item>> updateItem(Item item) async {
+    try {
+      // Record price history when value changes.
+      final existing = await _db.itemDao.getItemById(item.id);
+      if (item.currentValueCents != null &&
+          item.currentValueCents != existing?.currentValueCents) {
+        await _recordPrice(_db, _stamp, item.id, item.currentValueCents!);
+      }
+
+      final companion = db.ItemsCompanion(
+        id: Value(item.id),
+        name: Value(item.name),
+        description: Value(item.description),
+        categoryId: Value(item.categoryId),
+        roomId: Value(item.roomId),
+        purchaseDate: Value(item.purchaseDate),
+        purchasePriceCents: Value(item.purchasePriceCents),
+        currentValueCents: Value(item.currentValueCents),
+        replacementCostCents: Value(item.replacementCostCents),
+        condition: Value(item.condition?.label),
+        serialNumber: Value(item.serialNumber),
+        warrantyExpiration: Value(item.warrantyExpiration),
+        containerId: Value(item.containerId),
+        creatorProfileId: Value(item.creatorProfileId),
+        ownerProfileId: Value(item.ownerProfileId),
+        brand: Value(item.brand),
+        model: Value(item.model),
+        asin: Value(item.asin),
+        receiptId: Value(item.receiptId),
+        barcode: Value(item.barcode),
+        storeUrl: Value(item.storeUrl),
+        notes: Value(item.notes),
+        isInsured: Value(item.isInsured),
+        quantity: Value(item.quantity),
+        quantityUnit: Value(item.quantityUnit),
+        lowStockThreshold: Value(item.lowStockThreshold),
+        modifiedAt: Value(DateTime.now()),
+      );
+      await _stamp.write((c) => _db.itemDao.updateItem(companion, crdt: c));
+      return getItem(item.id);
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to update item: $e'));
+    }
+  }
+
+  @override
+  Future<Result<void>> deleteItem(String id) async {
+    try {
+      // Soft delete only. The photo files stay on disk so Undo and Recently
+      // deleted can bring the item back whole (RecentlyDeletedRepository).
+      await _stamp.write((c) => _db.itemDao.deleteItem(id, crdt: c));
+      return const Success(null);
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to delete item: $e'));
+    }
+  }
+
+  @override
+  Future<Result<void>> deleteItems(List<String> itemIds) async {
+    try {
+      // Soft delete; photo files are kept for a restore (see deleteItem).
+      await _stamp.write((c) => _db.itemDao.deleteItems(itemIds, crdt: c));
+      return const Success(null);
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to delete items: $e'));
+    }
+  }
+
+  @override
+  Future<Result<void>> moveItems(List<String> itemIds, String newRoomId) async {
+    try {
+      await _stamp.write(
+        (c) => _db.itemDao.moveItemsToRoom(itemIds, newRoomId, crdt: c),
+      );
+      return const Success(null);
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to move items: $e'));
+    }
+  }
+
+  @override
+  Future<Result<int>> countItems(ItemQuery query) async {
+    try {
+      final count = await _db.itemDao.countItems(
+        roomId: query.roomId,
+        categoryId: query.categoryId,
+      );
+      return Success(count);
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to count items: $e'));
+    }
+  }
+
+  @override
+  Stream<List<Item>> searchItems(String query) {
+    return _db.itemDao.searchItems(query).asyncMap(_enrichRows);
+  }
+
+  @override
+  Future<Item?> findByBarcode(String barcode) async {
+    final row = await _db.itemDao.getItemByBarcode(barcode);
+    return row == null ? null : (await _enrichRows([row])).first;
+  }
+
+  Future<List<Item>> _enrichRows(List<db.Item> rows) async {
+    if (rows.isEmpty) return const [];
+    final categories = await (_db.select(_db.categories)
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    final rooms = await (_db.select(_db.rooms)
+          ..where((t) => t.isDeleted.equals(false)))
+        .get();
+    final categoryNames = {for (final c in categories) c.id: c.name};
+    final roomNames = {for (final r in rooms) r.id: r.name};
+    return rows
+        .map(
+          (row) => _mapToEntity(
+            row,
+            categoryName: categoryNames[row.categoryId],
+            roomName: roomNames[row.roomId],
+          ),
+        )
+        .toList();
+  }
+
+  Item _mapToEntity(
+    db.Item row, {
+    String? categoryName,
+    String? roomName,
+  }) {
+    return Item(
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      categoryId: row.categoryId,
+      roomId: row.roomId,
+      categoryName: categoryName,
+      roomName: roomName,
+      purchaseDate: row.purchaseDate,
+      purchasePriceCents: row.purchasePriceCents,
+      currentValueCents: row.currentValueCents,
+      replacementCostCents: row.replacementCostCents,
+      condition: ItemCondition.fromString(row.condition),
+      serialNumber: row.serialNumber,
+      warrantyExpiration: row.warrantyExpiration,
+      containerId: row.containerId,
+      creatorProfileId: row.creatorProfileId,
+      ownerProfileId: row.ownerProfileId,
+      brand: row.brand,
+      model: row.model,
+      asin: row.asin,
+      receiptId: row.receiptId,
+      barcode: row.barcode,
+      storeUrl: row.storeUrl,
+      notes: row.notes,
+      isInsured: row.isInsured,
+      createdAt: row.createdAt,
+      modifiedAt: row.modifiedAt,
+      quantity: row.quantity,
+      quantityUnit: row.quantityUnit,
+      lowStockThreshold: row.lowStockThreshold,
+    );
+  }
+
+  @override
+  Stream<List<Item>> watchLowStockItems() {
+    return _db.itemDao.watchLowStockItems().asyncMap(_enrichRows);
+  }
+
+  @override
+  Future<Result<Item>> decrementQuantity(String id) async {
+    try {
+      await _stamp.write((c) => _db.itemDao.decrementQuantity(id, crdt: c));
+      return getItem(id);
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to decrement quantity: $e'));
+    }
+  }
+}

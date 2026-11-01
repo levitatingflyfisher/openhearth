@@ -1,0 +1,112 @@
+import 'package:clock/clock.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:still_life/core/providers/retry_policy.dart';
+import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
+import 'package:openhearth_design/openhearth_design.dart';
+
+import '../../../../core/providers/database_provider.dart';
+import '../../../../core/providers/stored_data_caches.dart';
+import '../../../../services/database/database.dart';
+import 'package:still_life/core/utils/date_arithmetic.dart';
+import 'package:still_life/core/widgets/failure_feedback.dart';
+
+/// FutureProvider that fetches items with warranty expiring within 180 days.
+final warrantyExpiringSoonProvider = FutureProvider<List<Item>>((ref) async {
+  rereadOnDatabaseWrites(ref);
+  final db = ref.watch(databaseProvider);
+  return db.itemDao.getWarrantyExpiringSoon(withinDays: 180);
+},
+  retry: noAutoRetry,
+);
+
+class WarrantyExpiryWidget extends ConsumerWidget {
+  const WarrantyExpiryWidget({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final itemsAsync = ref.watch(warrantyExpiringSoonProvider);
+    final theme = Theme.of(context);
+    final fmt = DateFormat('MMM d, yyyy');
+
+    return Card(
+      child: Padding(
+        padding: OhSpacing.insetMd,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.verified_user_outlined,
+                  size: 20,
+                  color: theme.colorScheme.primary,
+                ),
+                const SizedBox(width: OhSpacing.sm),
+                Text(
+                  'Warranties Expiring Soon',
+                  style: theme.textTheme.titleMedium,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            itemsAsync.when(
+              data: (items) {
+                if (items.isEmpty) {
+                  return Text(
+                    'No warranties expiring in the next 6 months',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurface.withAlpha(150),
+                    ),
+                  );
+                }
+                final displayed = items.take(5).toList();
+                return Column(
+                  children: displayed.map((item) {
+                    final expiry = item.warrantyExpiration!;
+                    final daysLeft = daysBetweenDates(clock.now(), expiry);
+                    final chipColor = daysLeft <= 30
+                        ? theme.colorScheme.error
+                        : daysLeft <= 90
+                        ? OhColors.amber400
+                        : OhColors.sage600;
+                    return ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(item.name, style: theme.textTheme.bodyMedium),
+                      subtitle: Text(
+                        'Expires ${fmt.format(expiry)}',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                      trailing: Chip(
+                        label: Text(
+                          daysLeft <= 0 ? 'Expired' : '$daysLeft days',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                          ),
+                        ),
+                        backgroundColor: chipColor,
+                        padding: EdgeInsets.zero,
+                        labelPadding: const EdgeInsets.symmetric(horizontal: 6),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      onTap: () => context.pushNamed(
+                        'itemDetail',
+                        pathParameters: {'itemId': item.id},
+                      ),
+                    );
+                  }).toList(),
+                );
+              },
+              loading: () => const LinearProgressIndicator(),
+              error: (e, _) =>
+                  inlineLoadFailure(e, what: "Couldn’t load warranties."),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

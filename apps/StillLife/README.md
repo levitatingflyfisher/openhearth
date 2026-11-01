@@ -1,0 +1,161 @@
+# Still Life — Home Inventory Management
+
+**Know what you own, where it is, what it's worth.**
+
+Still Life is a free, open-source mobile app for cataloguing everything in your home — where it lives, what it's worth, and what condition it's in. It runs entirely on your device. No account required. No subscription. No cloud you don't control.
+
+Built with Flutter. Android today; iOS on the roadmap.
+
+> **Vision — a catalogue you actually own.** Know what's in your home, where it lives,
+> and what it's worth, so the worst day (a fire, a flood, a claim) starts from a list
+> instead of from memory. It lives on your device, works with no account, and never
+> phones home. Read the north star in **[VISION.md](VISION.md)**; browse the full docs —
+> architecture, ADRs, privacy model, and the sync spec — in **[docs/](docs/README.md)**.
+
+---
+
+## Why Still Life?
+
+Most home inventory apps force you to choose between convenience and privacy — cloud sync means handing your possessions list to a third party; truly local apps feel unfinished. Still Life closes that gap:
+
+| | Still Life | Sortly / Itemtopia | Encircle / HomeZada |
+|---|---|---|---|
+| Fully local / offline | ✓ | Cloud-required | Cloud-required |
+| No account needed | ✓ | Requires signup | Requires signup |
+| LAN sync (no cloud) | ✓ | — | — |
+| AI-assisted cataloguing | ✓ (bring your key) | — | — |
+| Open source | ✓ (MIT) | Proprietary | Proprietary |
+| Free tier | Full feature set | Limited items | Limited items |
+| Container hierarchy | ✓ (shelf→item) | — | — |
+| QR labels (scan-to-find) | ✓ | Extra cost | — |
+
+---
+
+## Features
+
+### Inventory
+- Add items with photos, receipts, serial numbers, barcodes, purchase details, and notes
+- Scan a barcode to pre-fill product info (privacy-first: works offline, optional network lookup with your consent)
+- Scan receipts with OCR to auto-populate purchase date and price
+- Bulk-select items to move or delete in one tap; every delete can be undone, and
+  Settings → Recently deleted brings items back with their photos
+- Full-text search across name, description, notes, serial number, and barcode
+
+### Organisation
+- **Rooms** — group items by where they live in your home
+- **Containers** — shelves, boxes, drawers, cabinets within each room
+- **Categories** — flexible tagging with custom categories
+- **QR labels** — generate and share a printable QR label with a human-readable ID (e.g. `oaken-low-rafter`) for any item or container; scan to jump straight to the detail screen
+
+### Financial
+- **Dashboard** — live totals for household value, depreciation, value by room, value by category, and 6-month acquisition trend
+- **Value history** — automatic price history chart on every item detail page
+- **Depreciation tracking** — per-item depreciation estimates
+- **Insurance policies** — record coverage details and surface protection gaps
+- **Export** — CSV (for spreadsheets/insurers) or full JSON backup
+
+### AI-Assisted Cataloguing (bring your own AI)
+- Photograph a single item — or a whole shelf — and let a vision model suggest name, brand, model, category, and value; everything lands in a review screen before it's saved
+- Record a video walkthrough of a room (Android): the best frames are analyzed, merged, and presented as a reviewable item list
+- Speak a description and the transcript is structured into an item; receipt text is structured into line items
+- Works with **your own Ollama on the LAN** or **your own API key** (Anthropic, or any OpenAI-compatible endpoint) — every networked tier is opt-in and off by default
+- **On-device recognition (Android)**: a bundled coarse labeler works offline with zero setup; optionally download a SmolVLM2 model (Apache-2.0, ~1.7 GB or 546 MB, verified) for richer fully-offline analysis, and supported flagships can use Gemini Nano — single-photo only for now, honest limits in [docs/limitations.md](docs/limitations.md)
+
+### Maintenance & Warranty
+- Schedule recurring maintenance tasks with reminders
+- Warranty expiry alerts
+- Maintenance log with completion history
+
+### Sync & Backup
+- **LAN sync** — sync across devices on the same Wi-Fi with automatic CRDT conflict resolution; encrypted end to end with a key derived from a shared sync code, and refused outright rather than sent in the clear if the other device can't encrypt
+- **WebDAV backup**: back up to Nextcloud, ownCloud, or any WebDAV server, encrypted with your recovery words before it leaves the phone
+
+---
+
+## Getting Started
+
+### Prerequisites
+- [Flutter SDK](https://docs.flutter.dev/get-started/install) 3.x
+- Android SDK (for Android) or Xcode (for iOS)
+
+### Build from source
+
+Still Life's encryption (LAN-sync + backups), model downloads and design tokens come
+from **sibling packages** consumed by relative path — clone them beside this repo so
+`pub get` resolves (the layout every OpenHearth app uses):
+
+```
+OpenHearth/
+  ohStyle/openhearth_design/
+  DomovoiDiscernment/         # github: levitatingflyfisher/DomovoiDiscernment
+  packages/
+    sanctuary_auth_core/      # github: levitatingflyfisher/sanctuaryAuthCore
+    sanctuary_backup_ui/      # github: levitatingflyfisher/sanctuaryBackupUi
+    oh_fleet_conformance/     # github: levitatingflyfisher/ohFleetConformance
+  StillLife/                  # this repo — deps at ../
+```
+
+```bash
+git clone https://github.com/levitatingflyfisher/StillLife.git
+cd StillLife
+flutter pub get
+dart run build_runner build --delete-conflicting-outputs
+flutter run
+```
+
+### Optional configuration
+
+Still Life works with no configuration. Enable optional features in **Settings**:
+
+| Feature | Path |
+|---------|------|
+| AI analysis (cloud API key) | Settings → AI Analysis |
+| AI analysis (local Ollama) | Settings → AI Analysis |
+| Product barcode lookup | Settings → Barcode Lookup |
+| LAN sync | Settings → Sync & Backup |
+| WebDAV backup | Settings → WebDAV Backup |
+
+---
+
+## Running Tests
+
+```bash
+flutter test test/unit test/widget
+```
+
+The suite lives under `test/`, with unit, widget, and visual parts.
+
+---
+
+## Architecture
+
+Clean Architecture with three layers:
+
+- **Domain** — entities, repository interfaces (`lib/features/*/domain/`)
+- **Data** — Drift ORM + repository implementations (`lib/features/*/data/`, `lib/services/database/`)
+- **Presentation** — Riverpod state + Flutter screens (`lib/features/*/presentation/`)
+
+Key libraries: [Drift](https://drift.simonbinder.eu/) (SQLite ORM), [Riverpod](https://riverpod.dev/) (state management), [GoRouter](https://pub.dev/packages/go_router) (navigation), [fl_chart](https://pub.dev/packages/fl_chart) (charts), [qr_flutter](https://pub.dev/packages/qr_flutter) (QR labels).
+
+---
+
+## Roadmap
+
+The open problems ahead are in the Horizons section of [VISION.md](VISION.md#horizons-problems-not-a-feature-list). What is built today, area by area, is in [docs/reference/feature-status.md](docs/reference/feature-status.md).
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on reporting bugs and submitting changes.
+
+---
+
+## License
+
+Still Life is released under the [MIT License](LICENSE) — free to use, modify,
+and distribute, including commercially.
+
+---
+
+Still Life is part of the **OpenHearth** family of free, local-first tools for households.

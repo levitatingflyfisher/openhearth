@@ -1,0 +1,115 @@
+import 'package:drift/drift.dart';
+import 'package:uuid/uuid.dart';
+
+import '../../../../core/errors/failures.dart';
+import '../../../../core/errors/result.dart';
+import '../../../../services/database/database.dart' as db;
+import '../../domain/entities/policy.dart';
+import '../../domain/repositories/policy_repository.dart';
+import '../../../../core/sync/sync_stamp.dart';
+
+const _uuid = Uuid();
+
+class PolicyRepositoryImpl implements PolicyRepository {
+  final db.AppDatabase _db;
+
+  PolicyRepositoryImpl(this._db, {SyncStamp stamp = SyncStamp.none})
+    : _stamp = stamp;
+
+  /// Gives every write its sync stamp (see [SyncStamp]).
+  final SyncStamp _stamp;
+
+  @override
+  Stream<List<Policy>> watchAll() {
+    return _db.policyDao.watchAll().map((rows) => rows.map(_toEntity).toList());
+  }
+
+  @override
+  Future<Result<List<Policy>>> getByPropertyId(String propertyId) async {
+    try {
+      final rows = await _db.policyDao.getByPropertyId(propertyId);
+      return Success(rows.map(_toEntity).toList());
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to get policies: $e'));
+    }
+  }
+
+  @override
+  Future<Result<Policy>> create(Policy policy) async {
+    try {
+      final now = DateTime.now();
+      final id = policy.id.isEmpty ? _uuid.v4() : policy.id;
+      await _stamp.write(
+        (c) => _db.policyDao.insertPolicy(
+          db.PoliciesCompanion.insert(
+            id: id,
+            propertyId: policy.propertyId,
+            provider: policy.provider,
+            policyNumber: Value(policy.policyNumber),
+            coverageAmountCents: Value(policy.coverageAmountCents),
+            deductibleCents: Value(policy.deductibleCents),
+            premiumCents: Value(policy.premiumCents),
+            expiryDate: Value(policy.expiryDate),
+            createdAt: now,
+            modifiedAt: now,
+          ),
+          crdt: c,
+        ),
+      );
+      final created = await _db.policyDao.getById(id);
+      return Success(_toEntity(created!));
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to create policy: $e'));
+    }
+  }
+
+  @override
+  Future<Result<Policy>> update(Policy policy) async {
+    try {
+      final now = DateTime.now();
+      final ok = await _stamp.write(
+        (c) => _db.policyDao.updatePolicy(
+          db.PoliciesCompanion(
+            id: Value(policy.id),
+            propertyId: Value(policy.propertyId),
+            provider: Value(policy.provider),
+            policyNumber: Value(policy.policyNumber),
+            coverageAmountCents: Value(policy.coverageAmountCents),
+            deductibleCents: Value(policy.deductibleCents),
+            premiumCents: Value(policy.premiumCents),
+            expiryDate: Value(policy.expiryDate),
+            modifiedAt: Value(now),
+          ),
+          crdt: c,
+        ),
+      );
+      if (!ok) return const Err(DatabaseFailure('Policy not found'));
+      final updated = await _db.policyDao.getById(policy.id);
+      return Success(_toEntity(updated!));
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to update policy: $e'));
+    }
+  }
+
+  @override
+  Future<Result<void>> delete(String id) async {
+    try {
+      await _stamp.write((c) => _db.policyDao.deletePolicy(id, crdt: c));
+      return const Success(null);
+    } catch (e) {
+      return Err(DatabaseFailure('Failed to delete policy: $e'));
+    }
+  }
+
+  Policy _toEntity(db.Policy row) => Policy(
+    id: row.id,
+    propertyId: row.propertyId,
+    provider: row.provider,
+    policyNumber: row.policyNumber,
+    coverageAmountCents: row.coverageAmountCents,
+    deductibleCents: row.deductibleCents,
+    premiumCents: row.premiumCents,
+    expiryDate: row.expiryDate,
+    createdAt: row.createdAt,
+  );
+}

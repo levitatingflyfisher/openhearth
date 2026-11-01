@@ -1,0 +1,55 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:still_life/core/providers/retry_policy.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
+import '../../services/sync/crdt_manager.dart';
+import '../../services/sync/lan_sync_server.dart';
+import '../../services/sync/lan_sync_client.dart';
+import '../../services/network/lan_discovery.dart';
+import 'repository_providers.dart';
+import '../sync/sync_stamp.dart';
+
+/// The shared sync secret for this device (used to authenticate LAN sync).
+final syncSecretProvider = FutureProvider<String>((ref) {
+  return ref.watch(crdtManagerProvider).getSyncSecret();
+},
+  retry: noAutoRetry,
+);
+
+final _secureStorageProvider = Provider<FlutterSecureStorage>(
+  (ref) => const FlutterSecureStorage(),
+);
+
+final crdtManagerProvider = Provider<CrdtManager>((ref) {
+  return CrdtManager(ref.watch(_secureStorageProvider));
+});
+
+final lanSyncServerProvider = Provider<LanSyncServer>((ref) {
+  final server = LanSyncServer(
+    crdtManager: ref.watch(crdtManagerProvider),
+    importService: ref.watch(importServiceProvider),
+    exportService: ref.watch(exportServiceProvider),
+  );
+  ref.onDispose(() => server.stop());
+  return server;
+});
+
+final lanDiscoveryProvider = Provider<LanDiscovery>((ref) {
+  final discovery = LanDiscovery(crdtManager: ref.watch(crdtManagerProvider));
+  ref.onDispose(() => discovery.dispose());
+  return discovery;
+});
+
+final lanSyncClientProvider = Provider<LanSyncClient>((ref) {
+  return LanSyncClient(
+    crdtManager: ref.watch(crdtManagerProvider),
+    exportService: ref.watch(exportServiceProvider),
+    importService: ref.watch(importServiceProvider),
+  );
+});
+
+/// Every repository write goes through this so it carries a sync stamp
+/// (yellow paper §4). Failure to stamp degrades to an unstamped write.
+final syncStampProvider = Provider<SyncStamp>(
+  (ref) => SyncStamp(ref.watch(crdtManagerProvider)),
+);

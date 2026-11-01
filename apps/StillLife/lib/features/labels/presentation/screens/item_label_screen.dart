@@ -1,0 +1,188 @@
+import 'package:openhearth_design/openhearth_design.dart';
+import 'dart:ui' as ui;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:share_plus/share_plus.dart';
+
+import '../../../../core/utils/label_id.dart';
+import '../../../inventory/presentation/controllers/inventory_controller.dart';
+import 'package:still_life/core/widgets/failure_feedback.dart';
+
+class ItemLabelScreen extends ConsumerStatefulWidget {
+  final String itemId;
+
+  const ItemLabelScreen({super.key, required this.itemId});
+
+  @override
+  ConsumerState<ItemLabelScreen> createState() => _ItemLabelScreenState();
+}
+
+class _ItemLabelScreenState extends ConsumerState<ItemLabelScreen> {
+  final _repaintKey = GlobalKey();
+  bool _isSharing = false;
+
+  Future<void> _shareLabel() async {
+    setState(() => _isSharing = true);
+    try {
+      final context = _repaintKey.currentContext;
+      if (context == null) return;
+      final renderObject = context.findRenderObject();
+      if (renderObject == null || renderObject is! RenderRepaintBoundary) {
+        return;
+      }
+
+      final image = await renderObject.toImage(pixelRatio: 3.0);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) return;
+      final bytes = byteData.buffer.asUint8List();
+
+      // Share bytes directly (no temp file) — same path on Android and web.
+      final name = 'still_life_label_${widget.itemId.substring(0, 8)}.png';
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile.fromData(bytes, mimeType: 'image/png', name: name)],
+          subject: 'Still Life Item Label',
+          fileNameOverrides: [name],
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(failureSentence("Couldn’t share the label", e))));
+      }
+    } finally {
+      if (mounted) setState(() => _isSharing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final itemAsync = ref.watch(itemDetailProvider(widget.itemId));
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('QR Label'),
+        actions: [OhBarActions(children: [
+          if (_isSharing)
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          else
+            OhBarAction(
+              icon: Icons.share_outlined,
+              label: 'Share',
+              semanticLabel: 'Share label',
+              onPressed: _shareLabel,
+            ),
+        ])],
+      ),
+      body: OhPage(
+        padding: EdgeInsets.zero,
+        child: itemAsync.when(
+        data: (item) {
+          if (item == null) {
+            return const Center(child: Text('Item not found'));
+          }
+
+          return Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(32),
+              child: RepaintBoundary(
+                key: _repaintKey,
+                child: Container(
+                  width: 280,
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: OhRadii.lg,
+                    border: Border.all(color: Colors.grey.shade300),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withAlpha(20),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // App name
+                      Text(
+                        'Still Life',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey.shade500,
+                          letterSpacing: 1.2,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      // QR code
+                      QrImageView(
+                        data: widget.itemId,
+                        version: QrVersions.auto,
+                        size: 200,
+                        backgroundColor: Colors.white,
+                      ),
+                      const SizedBox(height: 12),
+                      // Item name
+                      Text(
+                        item.name,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black87,
+                        ),
+                      ),
+                      if (item.roomName != null) ...[
+                        const SizedBox(height: OhSpacing.xs),
+                        Text(
+                          item.roomName!,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: OhSpacing.sm),
+                      Text(
+                        labelId(widget.itemId),
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.grey.shade700,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, st) => loadFailure(
+          e,
+          st,
+          title: "Couldn’t load this item",
+          onRetry: () => ref.invalidate(itemDetailProvider(widget.itemId)),
+        ),
+      ),
+      ),
+    );
+  }
+}

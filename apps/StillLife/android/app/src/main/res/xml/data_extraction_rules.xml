@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12 and newer. Still Life leaves Android's own backup on, so this
+  file says what stays out of it. flutter_secure_storage keeps the recovery
+  words and the WebDAV password in FlutterSecureStorage.xml; it is sealed by
+  a key that never leaves this phone, so a copy would be useless to anyone,
+  and none should leave. Everything else may be backed up if the phone's
+  owner allows it in Android settings.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
+    </device-transfer>
+</data-extraction-rules>

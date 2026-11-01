@@ -1,0 +1,140 @@
+import 'package:flutter_test/flutter_test.dart';
+import 'package:still_life/features/import/domain/parsed_import_item.dart';
+import 'package:still_life/services/import/bank_statement_parser.dart';
+
+void main() {
+  late BankStatementParser parser;
+
+  setUp(() => parser = BankStatementParser());
+
+  // --- BankColumnMap & detectColumns ---
+
+  test(
+    'detectColumns finds date/description/amount columns by header keywords',
+    () {
+      const csv = 'Date,Description,Amount\n2024-01-01,Coffee Shop,12.50\n';
+      final map = parser.detectColumns(csv);
+      expect(map.dateCol, 0);
+      expect(map.descriptionCol, 1);
+      expect(map.amountCol, 2);
+    },
+  );
+
+  test('detectColumns returns null indices when columns not found', () {
+    const csv = 'A,B,C\n1,2,3\n';
+    final map = parser.detectColumns(csv);
+    expect(map.dateCol, isNull);
+    expect(map.descriptionCol, isNull);
+    expect(map.amountCol, isNull);
+  });
+
+  // --- parse() ---
+
+  test('parse returns items for positive amounts', () {
+    const csv = 'Date,Description,Amount\n2024-01-15,Coffee Shop,12.50\n';
+    const map = BankColumnMap(dateCol: 0, descriptionCol: 1, amountCol: 2);
+    final result = parser.parse(csv, map);
+    expect(result.items.length, 1);
+    expect(result.items.first.name, 'Coffee Shop');
+    expect(result.items.first.price, 12.50);
+    expect(result.items.first.source, ImportSource.bankCsv);
+  });
+
+  test('parse skips rows with negative amounts', () {
+    const csv =
+        'Date,Description,Amount\n'
+        '2024-01-15,Refund,-5.00\n'
+        '2024-01-16,Lamp,40.00\n'
+        '2024-01-17,Rug,90.00\n';
+    const map = BankColumnMap(dateCol: 0, descriptionCol: 1, amountCol: 2);
+    final result = parser.parse(csv, map);
+    expect(result.items.map((i) => i.name), ['Lamp', 'Rug']);
+  });
+
+  test('a signed Amount column that records purchases as negatives imports '
+      'the purchases and skips the payments and credits', () {
+    // One signed column, debits negative: the usual debit-card export. The
+    // old rule skipped every negative and so imported nothing.
+    const csv =
+        'Date,Description,Amount\n'
+        '2024-01-15,Standing Desk,-499.99\n'
+        '2024-01-16,Monitor,-210.00\n'
+        '2024-01-17,Card payment,500.00\n'
+        '2024-01-18,Lamp,(35.50)\n';
+    const map = BankColumnMap(dateCol: 0, descriptionCol: 1, amountCol: 2);
+    final result = parser.parse(csv, map);
+    expect(result.items.map((i) => i.name), [
+      'Standing Desk',
+      'Monitor',
+      'Lamp',
+    ]);
+    expect(result.items.map((i) => i.price), [499.99, 210.00, 35.50]);
+  });
+
+  test('parse skips rows with accounting notation (123.45)', () {
+    const csv =
+        'Date,Description,Amount\n'
+        '2024-01-15,Credit,(50.00)\n'
+        '2024-01-16,Lamp,40.00\n';
+    const map = BankColumnMap(dateCol: 0, descriptionCol: 1, amountCol: 2);
+    final result = parser.parse(csv, map);
+    expect(result.items.map((i) => i.name), ['Lamp']);
+  });
+
+  test('parse skips rows with unparseable amount', () {
+    const csv = 'Date,Description,Amount\n2024-01-15,Coffee,N/A\n';
+    const map = BankColumnMap(dateCol: 0, descriptionCol: 1, amountCol: 2);
+    final result = parser.parse(csv, map);
+    expect(result.items, isEmpty);
+  });
+
+  test('parse sets purchaseDate from date column', () {
+    const csv = 'Date,Description,Amount\n2024-01-15,Coffee,12.50\n';
+    const map = BankColumnMap(dateCol: 0, descriptionCol: 1, amountCol: 2);
+    final result = parser.parse(csv, map);
+    expect(result.items.first.purchaseDate, DateTime(2024, 1, 15));
+  });
+
+  test('parse truncates at 500 rows and sets truncated=true', () {
+    final rows = List.generate(502, (i) => '2024-01-01,Item $i,${i + 1}.00');
+    final csv = 'Date,Description,Amount\n${rows.join('\n')}\n';
+    const map = BankColumnMap(dateCol: 0, descriptionCol: 1, amountCol: 2);
+    final result = parser.parse(csv, map);
+    expect(result.items.length, 500);
+    expect(result.truncated, isTrue);
+  });
+
+  test('parse returns truncated=false when under 500 rows', () {
+    const csv = 'Date,Description,Amount\n2024-01-15,Coffee,12.50\n';
+    const map = BankColumnMap(dateCol: 0, descriptionCol: 1, amountCol: 2);
+    final result = parser.parse(csv, map);
+    expect(result.truncated, isFalse);
+  });
+
+  test('parse handles non-USD currency prefix (£, €)', () {
+    const csv =
+        'Date,Description,Amount\n2024-01-15,Grocery,£12.50\n2024-01-16,Cafe,€8.00\n';
+    const map = BankColumnMap(dateCol: 0, descriptionCol: 1, amountCol: 2);
+    final result = parser.parse(csv, map);
+    expect(result.items.length, 2);
+    expect(result.items[0].price, 12.50);
+    expect(result.items[1].price, 8.00);
+  });
+
+  group('parseImportDate', () {
+    test('parses US MM/DD/YYYY (was silently dropped by DateTime.parse)', () {
+      expect(parseImportDate('01/15/2024'), DateTime(2024, 1, 15));
+      expect(parseImportDate('1/5/2024'), DateTime(2024, 1, 5));
+    });
+    test('still parses ISO-8601', () {
+      expect(parseImportDate('2024-01-15'), DateTime(2024, 1, 15));
+    });
+    test('falls through to day-first for an out-of-range month', () {
+      expect(parseImportDate('13/04/2024'), DateTime(2024, 4, 13));
+    });
+    test('returns null for unparseable text', () {
+      expect(parseImportDate('not a date'), isNull);
+      expect(parseImportDate(''), isNull);
+    });
+  });
+}

@@ -1,0 +1,71 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+/android/build/
+.worktrees/
+
+# Local working artifacts (per CLAUDE.md: never commit)
+docs/superpowers/
+
+# Claude Code worktrees
+.claude/
+CLAUDE.md
+/docs/superpowers/
+test/visual/failures/
+
+# Flutter golden-test failure output
+test/**/failures/
+GEMINI.md
+.superpowers/
+
+# Generated sources — CI and every local build run build_runner, so a
+# committed copy is only a copy that can go stale:
+# `dart run build_runner build --delete-conflicting-outputs`
+*.g.dart
+
+# The llama.cpp runtime is fetched at build time and checksum-verified
+# (see android/app/build.gradle.kts). A binary in git is a binary nobody
+# reviews, and F-Droid's scanner treats one in the source tree as an error.
+android/app/libs/*.aar
