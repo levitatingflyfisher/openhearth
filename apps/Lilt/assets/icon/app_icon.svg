@@ -1,13 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect width="512" height="512" fill="#8B6F47"/>
-  <g fill="#F4ECDD">
-    <!-- stem -->
-    <rect x="250" y="150" width="30" height="212" rx="15"/>
-    <!-- flag: one clean quaver flag flowing off the stem top -->
-    <path d="M 265 152
-             C 360 176, 388 250, 320 314
-             C 372 250, 352 196, 265 205 Z"/>
-    <!-- notehead -->
-    <ellipse cx="203" cy="352" rx="72" ry="53" transform="rotate(-24 203 352)"/>
-  </g>
-</svg>
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='118' fill='#F6F0E7'/><path d='M214 170 L362 136 L362 178 L214 212 Z' fill='#946E3C' stroke='#946E3C' stroke-width='14' stroke-linejoin='round'/><g stroke='#946E3C' stroke-width='26' stroke-linecap='round'><line x1='214' y1='178' x2='214' y2='340'/><line x1='362' y1='144' x2='362' y2='306'/></g><ellipse cx='176' cy='348' rx='46' ry='35' transform='rotate(-18 176 348)' fill='#C89A54'/><ellipse cx='324' cy='314' rx='46' ry='35' transform='rotate(-18 324 314)' fill='#946E3C'/></svg>
